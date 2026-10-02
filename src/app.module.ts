@@ -4,15 +4,14 @@ import { BusModule } from './bus/bus.module';
 import { GatewayKeyGuard } from './common/gateway-key.guard';
 import { HttpExceptionFilter } from './common/http-exception.filter';
 import { RolesGuard } from './common/identity';
-import { ExampleModule } from './example/example.module';
+import { BookingModule } from './booking/booking.module';
 import { HealthModule } from './health/health.module';
 
 @Module({
   imports: [
     HealthModule,
     BusModule,
-    // Módulo de ejemplo: elimínalo cuando arranques tu servicio real.
-    ExampleModule,
+    BookingModule,
   ],
   providers: [
     // Orden de los guards: primero se comprueba que la petición venga del
