@@ -6,7 +6,8 @@
 |---|---|
 | **Dueño** | Fabián Andrade |
 | **Retos** | **CC-3** (cupos limitados) · **RT-1** (emite los cambios de disponibilidad) |
-| **Datos** | PostgreSQL propio |
+| **Datos** | En memoria (8 oct 2026); PostgreSQL propio pendiente |
+| **Producción** | Railway, solo por red privada: `http://planazo-booking.railway.internal:3001` |
 | **Puerto local sugerido** | `3001` |
 | **Contexto general** | [planazo-frontend/docs/contexto.md](https://github.com/planazo-team/planazo-frontend/blob/main/docs/contexto.md) |
 
@@ -30,6 +31,8 @@ Nadie llama a este servicio directamente: todo entra por [`planazo-api-gateway`]
 ---
 
 ## Datos
+
+> **Estado al 8 de octubre:** el servicio guarda todo esto **en memoria** (`src/booking/booking.service.ts`, seed en `src/booking/seed.ts`). La comprobación de `version` y la escritura ocurren en el mismo paso síncrono, que en un proceso de Node equivale al `UPDATE` de abajo. Un redespliegue reinicia las reservas. El esquema es el objetivo al pasar a PostgreSQL.
 
 ```sql
 establishments (id, name, category, lat, lng, zone, photo_url)
@@ -91,10 +94,11 @@ Se publican al bus; `planazo-realtime` los persiste con su `seq` y los difunde.
 
 | Evento | Payload mínimo | Quién lo recibe |
 |---|---|---|
-| `PLACE.UPDATE` | `{place_id, free_seats}` | clientes suscritos a `zone:<zona>` |
-| `INV.UPDATE` | `{place_id, slot_id, capacity, taken, version}` | `place:<id>` (ficha abierta y panel) |
-| `RESERVE.OK` | `{reservation_id, code, slot_id, user_id}` | `user:<id>` y el panel del negocio |
-| `RESERVE.CONFLICT` | `{slot_id, user_id, reason}` | `user:<id>` |
+| `PLACE.UPDATE` | `{ placeId, freeSeats }` | `zone:<zona>` (y `place:<id>` al crear un evento) |
+| `INV.UPDATE` | `{ placeId, slot: Slot }` | `place:<id>` (ficha abierta y panel) |
+| `RESERVE.OK` | la `Reservation` completa, plana | `place:<id>` y `user:<id>` |
+
+`RESERVE.CONFLICT` está en el contrato pero no se publica todavía: el `409` llega por HTTP.
 
 ---
 
@@ -109,7 +113,7 @@ Se publican al bus; `planazo-realtime` los persiste con su `seq` y los difunde.
 
 ## Datos semilla
 
-El catálogo del piloto son 12 establecimientos de Zona G y Zona T (`p1`…`p12`) con sus franjas y eventos. Están en `frontend/src/lib/seed.ts` del repo del frontend — cópialos a un script de seed de este servicio para que ambos modos (`mock` y `live`) muestren lo mismo.
+El catálogo del piloto son 12 establecimientos de Zona G y Zona T (`p1`…`p12`) con sus franjas y eventos. Están en `frontend/src/lib/seed.ts` del repo del frontend y copiados en `src/booking/seed.ts` de este servicio, para que ambos modos (`mock` y `live`) muestren lo mismo. Se cargan al arrancar; no hay script aparte.
 
 Establecimientos con dueño asignado: `p7` (Bar El Zaguán → `b1`), `p1` (Fideos de la Nona → `b2`), `p8` (Terraza 85 → `b3`).
 
@@ -119,9 +123,12 @@ Establecimientos con dueño asignado: `p7` (Bar El Zaguán → `b1`), `p1` (Fide
 
 ```bash
 PORT=3001
-DATABASE_URL=postgresql://user:pass@host:5432/booking
-BUS_URL=redis://localhost:6379      # para publicar eventos de dominio
+GATEWAY_KEY=...                     # la misma del gateway; sin ella no se exige (desarrollo)
+BUS_URL=redis://localhost:6379      # para publicar eventos de dominio; sin ella, no-op con warn
+DATABASE_URL=postgresql://...       # todavía no se usa
 ```
+
+Ver [`.env.example`](.env.example).
 
 ---
 
@@ -136,6 +143,6 @@ Dos criterios que **no son opcionales** en este servicio:
 
 ## Despliegue en Railway
 
-1. New Project → Deploy from GitHub repo → `planazo-team/planazo-booking`.
-2. Agrega un **PostgreSQL** al proyecto; Railway inyecta `DATABASE_URL`.
-3. Copia la URL pública que te da Railway y pásasela a Juan Diego: es el `BOOKING_URL` del gateway.
+Ya está desplegado en el proyecto de Planazo, desde GitHub (`main`), **sin dominio público**: el gateway lo alcanza por `http://planazo-booking.railway.internal:3001`. Lo crea `planazo-infra/scripts/railway-deploy-core.sh` con `PORT=3001`, `GATEWAY_KEY` y `BUS_URL=${{Redis.REDIS_URL}}`. Cada push a `main` redespliega (y reinicia el estado en memoria).
+
+Cuando pase a PostgreSQL: agregar `DATABASE_URL` apuntando al Postgres del proyecto con su propio esquema o base.
