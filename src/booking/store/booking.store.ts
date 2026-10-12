@@ -1,0 +1,59 @@
+import type { Category, Place, PlaceBase, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
+
+/**
+ * Dónde viven lugares, franjas, eventos y reservas. Hay dos implementaciones
+ * con la misma forma:
+ *
+ *   - `PgBookingStore`: PostgreSQL (esquema `booking`). Es la de producción:
+ *     sobrevive a los redespliegues y el lock optimista lo hace cumplir la
+ *     propia base con `UPDATE ... WHERE version = $v`.
+ *   - `MemoryBookingStore`: en memoria, para tests y para correr sin base.
+ *
+ * Las dos operaciones que importan para CC-3 (`reserve` y `updateCapacity`)
+ * comparan la versión y escriben en un solo paso indivisible: si alguien
+ * escribió antes, devuelven el motivo en vez de pisar el cambio.
+ */
+
+export const BOOKING_STORE = 'planazo:bookingStore';
+
+export type WriteFailure = 'FRANJA_NO_EXISTE' | 'VERSION_CONFLICT' | 'SIN_CUPO' | 'CAPACIDAD_MENOR';
+
+export type WriteResult<T> = { ok: true; value: T } | { ok: false; code: WriteFailure; current?: Slot };
+
+/** Lugar con dueño. `ownerId` nunca sale hacia el cliente. */
+export type StoredPlace = PlaceBase & { ownerId?: string | null };
+
+export interface NewReservation {
+  id: string;
+  code: string;
+  userId: string;
+  userName: string;
+  createdAt: number;
+}
+
+export interface BookingStore {
+  /** Crea el esquema si hace falta y carga el catálogo semilla la primera vez. */
+  init(): Promise<void>;
+
+  listPlaces(q: { zone?: Zone; category?: Category }): Promise<Place[]>;
+  getPlace(id: string): Promise<StoredPlace | null>;
+  /** El lugar que administra un usuario (un negocio tiene uno). */
+  placeOwnedBy(ownerId: string): Promise<StoredPlace | null>;
+  freeSeats(placeId: string): Promise<number | null>;
+  slotsOf(placeId: string): Promise<Slot[]>;
+  eventsOf(placeId: string): Promise<PlaceEvent[]>;
+  getSlot(id: string): Promise<Slot | null>;
+
+  createPlace(place: StoredPlace, slots: Slot[]): Promise<void>;
+  createEvent(e: PlaceEvent): Promise<void>;
+
+  /** CC-3: suma `people` a la franja solo si la versión sigue siendo `version` y alcanza el cupo. */
+  reserve(input: { slotId: string; version: number; people: number }, r: NewReservation): Promise<WriteResult<{ slot: Slot; reservation: Reservation }>>;
+  /** CC-3 en el panel: cambia la capacidad solo si la versión sigue vigente y no queda por debajo de lo reservado. */
+  updateCapacity(input: { slotId: string; version: number; capacity: number }): Promise<WriteResult<Slot>>;
+
+  reservationsOfUser(userId: string): Promise<Reservation[]>;
+  reservationsOfPlace(placeId: string): Promise<Reservation[]>;
+
+  close?(): Promise<void>;
+}
