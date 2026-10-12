@@ -1,14 +1,34 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { Pool } from 'pg';
 import { BusService } from '../bus/bus.service';
 import { BookingService } from './booking.service';
+import type { BookingStore } from './store/booking.store';
+import { MemoryBookingStore } from './store/memory.store';
+import { PgBookingStore } from './store/pg.store';
 
-function nuevoServicio() {
-  const bus = { publish: jest.fn().mockResolvedValue(undefined) } as unknown as BusService;
-  return { service: new BookingService(bus), bus };
+/**
+ * Las mismas pruebas corren contra los dos almacenes. La de PostgreSQL solo
+ * corre si hay TEST_DATABASE_URL (en local: el Postgres de planazo-infra);
+ * usa el esquema `booking` de esa base y lo recrea antes de cada prueba.
+ */
+const PG_URL = process.env.TEST_DATABASE_URL;
+
+const almacenes: Array<[string, () => Promise<BookingStore>]> = [['memoria', async () => new MemoryBookingStore()]];
+if (PG_URL) {
+  almacenes.push([
+    'postgres',
+    async () => {
+      const pool = new Pool({ connectionString: PG_URL });
+      await pool.query('DROP SCHEMA IF EXISTS booking CASCADE');
+      await pool.end();
+      return new PgBookingStore(PG_URL);
+    },
+  ]);
 }
 
 const cliente = (id: string) => ({ userId: id, role: 'cliente' as const, userName: `Cliente ${id}` });
 const negocio = { userId: 'b1', role: 'negocio' as const, placeId: 'p7' };
+const nuevoNegocio = (id: string) => ({ userId: id, role: 'negocio' as const, userName: `Dueño ${id}` });
 
 /** Extrae el `code` del cuerpo de una HttpException. */
 async function codigoDe(p: Promise<unknown>): Promise<string | undefined> {
@@ -20,10 +40,24 @@ async function codigoDe(p: Promise<unknown>): Promise<string | undefined> {
   }
 }
 
-describe('BookingService', () => {
-  it('lista los 12 lugares del seed con sus cupos libres', () => {
-    const { service } = nuevoServicio();
-    const places = service.listPlaces();
+describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
+  let service: BookingService;
+  let store: BookingStore;
+  let publish: jest.Mock;
+
+  beforeEach(async () => {
+    publish = jest.fn().mockResolvedValue(undefined);
+    store = await crear();
+    service = new BookingService({ publish } as unknown as BusService, store);
+    await service.onModuleInit();
+  });
+
+  afterEach(async () => {
+    await service.onModuleDestroy();
+  });
+
+  it('lista los 12 lugares del seed con sus cupos libres', async () => {
+    const places = await service.listPlaces();
     expect(places).toHaveLength(12);
     // p7: (8-3) + (8-6) + (8-7) = 8
     expect(places.find((p) => p.id === 'p7')?.freeSeats).toBe(8);
@@ -31,50 +65,65 @@ describe('BookingService', () => {
     expect(places.find((p) => p.id === 'p6')?.freeSeats).toBeNull();
   });
 
-  it('filtra por zona y categoría', () => {
-    const { service } = nuevoServicio();
-    const bares = service.listPlaces({ zone: 'zona-t', category: 'bar' });
+  it('filtra por zona y categoría', async () => {
+    const bares = await service.listPlaces({ zone: 'zona-t', category: 'bar' });
     expect(bares.map((p) => p.id).sort()).toEqual(['p7', 'p8']);
   });
 
   it('reserva con la versión vigente, sube la versión y publica el inventario', async () => {
-    const { service, bus } = nuevoServicio();
     const r = await service.reserve(cliente('u1'), { slotId: 'p7-s1', people: 2, version: 1 });
 
     expect(r.code).toMatch(/^[A-Z2-9]{3}-[A-Z2-9]{3}$/);
-    const slot = service.getPlace('p7').slots.find((s) => s.id === 'p7-s1')!;
+    expect(r).toMatchObject({ placeId: 'p7', placeName: 'Bar El Zaguán', startsAt: '19:00', people: 2 });
+    const slot = (await service.getPlace('p7')).slots.find((s) => s.id === 'p7-s1')!;
     expect(slot).toMatchObject({ taken: 5, version: 2 });
-    expect(service.myReservations('u1')).toHaveLength(1);
+    expect(await service.myReservations('u1')).toHaveLength(1);
 
-    const tipos = (bus.publish as jest.Mock).mock.calls.map((c) => c[0]);
-    expect(tipos).toEqual(['INV.UPDATE', 'PLACE.UPDATE', 'RESERVE.OK']);
+    expect(publish.mock.calls.map((c) => c[0])).toEqual(['INV.UPDATE', 'PLACE.UPDATE', 'RESERVE.OK']);
   });
 
   it('CC-3: de N reservas simultáneas con la misma versión, gana exactamente una', async () => {
-    const { service } = nuevoServicio();
-    const intentos = ['u1', 'u2', 'u3', 'u4', 'u5', 'u6'].map((u) =>
-      service.reserve(cliente(u), { slotId: 'p1-s1', people: 1, version: 1 }).then(
-        () => 'OK',
-        (e: ConflictException) => (e.getResponse() as { code: string }).code,
+    const usuarios = Array.from({ length: 30 }, (_, i) => `u${i + 1}`);
+    const resultados = await Promise.all(
+      usuarios.map((u) =>
+        service.reserve(cliente(u), { slotId: 'p1-s1', people: 1, version: 1 }).then(
+          () => 'OK',
+          (e: ConflictException) => (e.getResponse() as { code: string }).code,
+        ),
       ),
     );
-    const resultados = await Promise.all(intentos);
 
     expect(resultados.filter((r) => r === 'OK')).toHaveLength(1);
-    expect(resultados.filter((r) => r === 'VERSION_CONFLICT')).toHaveLength(5);
+    expect(resultados.filter((r) => r === 'VERSION_CONFLICT')).toHaveLength(29);
     // Solo se descontó un cupo: nada de sobreventa.
-    expect(service.getPlace('p1').slots[0]).toMatchObject({ taken: 7, version: 2 });
+    expect((await service.getPlace('p1')).slots[0]).toMatchObject({ taken: 7, version: 2 });
+  });
+
+  it('CC-3: reintentando con la versión nueva, nunca se vende más que la capacidad', async () => {
+    // p7-s3: capacidad 8, ocupados 7 → queda 1 cupo para 10 personas que insisten.
+    const intentar = async (u: string): Promise<string> => {
+      for (let i = 0; i < 20; i++) {
+        const slot = (await service.getPlace('p7')).slots.find((s) => s.id === 'p7-s3')!;
+        if (slot.capacity - slot.taken < 1) return 'LLENO';
+        const code = await codigoDe(service.reserve(cliente(u), { slotId: 'p7-s3', people: 1, version: slot.version }));
+        if (!code) return 'OK';
+        if (code !== 'VERSION_CONFLICT') return code;
+      }
+      return 'AGOTÓ_REINTENTOS';
+    };
+    const resultados = await Promise.all(Array.from({ length: 10 }, (_, i) => intentar(`u${i}`)));
+    expect(resultados.filter((r) => r === 'OK')).toHaveLength(1);
+    const slot = (await service.getPlace('p7')).slots.find((s) => s.id === 'p7-s3')!;
+    expect(slot.taken).toBe(8);
   });
 
   it('rechaza con SIN_CUPO cuando no alcanzan los cupos', async () => {
-    const { service } = nuevoServicio();
     // p7-s3: capacidad 8, ocupados 7.
     const code = await codigoDe(service.reserve(cliente('u1'), { slotId: 'p7-s3', people: 2, version: 1 }));
     expect(code).toBe('SIN_CUPO');
   });
 
   it('panel: la capacidad no baja de lo ya reservado y respeta la versión', async () => {
-    const { service } = nuevoServicio();
     expect(
       await codigoDe(service.updateSlotCapacity(negocio, { placeId: 'p7', slotId: 'p7-s2', capacity: 5, version: 1 })),
     ).toBe('CAPACIDAD_MENOR');
@@ -89,17 +138,65 @@ describe('BookingService', () => {
   });
 
   it('un negocio no puede operar un lugar ajeno', async () => {
-    const { service } = nuevoServicio();
     await expect(
       service.updateSlotCapacity(negocio, { placeId: 'p1', slotId: 'p1-s1', capacity: 20, version: 1 }),
     ).rejects.toBeInstanceOf(ForbiddenException);
-    expect(() => service.placeReservations(negocio, 'p1')).toThrow(ForbiddenException);
+    await expect(service.placeReservations(negocio, 'p1')).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('publica un evento con cupo máximo en el lugar del negocio', async () => {
-    const { service } = nuevoServicio();
     const e = await service.createEvent(negocio, { placeId: 'p7', title: 'Noche de vinilos', startsAt: '21:00', capacity: 30 });
     expect(e).toMatchObject({ placeId: 'p7', capacity: 30, taken: 0 });
-    expect(service.getPlace('p7').events.map((x) => x.title)).toContain('Noche de vinilos');
+    expect((await service.getPlace('p7')).events.map((x) => x.title)).toContain('Noche de vinilos');
+  });
+
+  it('un negocio nuevo crea su lugar, queda en el mapa y se anuncia en vivo', async () => {
+    const dueño = nuevoNegocio('n-abc12345');
+    const p = await service.createPlace(dueño, {
+      name: 'La Guarida',
+      category: 'bar',
+      lat: 4.6668,
+      lng: -74.0531,
+      priceLevel: 2,
+      cover: 'bar-2',
+    });
+
+    expect(p).toMatchObject({ name: 'La Guarida', category: 'bar', zone: 'zona-t', cover: 'bar-2', freeSeats: 56 });
+    expect((await service.listPlaces()).map((x) => x.id)).toContain(p.id);
+    expect((await service.ownedPlace({ ...dueño })).id).toBe(p.id);
+    expect((await service.getPlace(p.id)).slots).toHaveLength(3);
+    // El dueño nunca sale hacia el cliente.
+    expect(JSON.stringify(await service.getPlace(p.id))).not.toContain('n-abc12345');
+
+    const [tipo, payload, topics] = publish.mock.calls.at(-1)!;
+    expect(tipo).toBe('PLACE.CREATED');
+    expect(payload.place.id).toBe(p.id);
+    expect(topics).toEqual(['zone:zona-t', `place:${p.id}`]);
+
+    // Y puede operarlo con su placeId (el gateway se lo pone en el token).
+    const slot = await service.updateSlotCapacity(
+      { ...dueño, placeId: p.id },
+      { placeId: p.id, slotId: `${p.id}-s1`, capacity: 30, version: 1 },
+    );
+    expect(slot.capacity).toBe(30);
+  });
+
+  it('una cuenta de negocio tiene un solo lugar', async () => {
+    const dueño = nuevoNegocio('n-dup00001');
+    const datos = { name: 'Dos Veces', category: 'restaurante', lat: 4.6555, lng: -74.0565 };
+    const resultados = await Promise.all([service.createPlace(dueño, datos), service.createPlace(dueño, datos)].map((p) => codigoDe(p)));
+    expect(resultados.filter((c) => c === undefined)).toHaveLength(1);
+    expect(resultados.filter((c) => c === 'YA_TIENE_LUGAR')).toHaveLength(1);
+  });
+
+  it('no acepta lugares fuera del piloto ni sin nombre', async () => {
+    const dueño = nuevoNegocio('n-fuera001');
+    expect(await codigoDe(service.createPlace(dueño, { name: 'Lejos', category: 'bar', lat: 4.6, lng: -74.1 }))).toBe(
+      'UBICACION_FUERA_DEL_PILOTO',
+    );
+    expect(await codigoDe(service.createPlace(dueño, { name: 'x', category: 'bar', lat: 4.66, lng: -74.05 }))).toBe(
+      'NOMBRE_INVALIDO',
+    );
+    expect(await codigoDe(service.ownedPlace(dueño))).toBe('SIN_LUGAR');
   });
 });

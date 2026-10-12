@@ -3,6 +3,7 @@ import type { Request } from 'express';
 import { Identity, Roles } from '../common/identity';
 import { BookingService } from './booking.service';
 import type { Category, Zone } from './booking.types';
+import type { NewPlaceInput } from './new-place';
 
 /** Nombre del usuario tal como lo reenvía el gateway (codificado con encodeURIComponent). */
 function nombreDesdeRequest(req: Request, fallback: string): string {
@@ -19,6 +20,8 @@ function nombreDesdeRequest(req: Request, fallback: string): string {
 /**
  * Rutas de booking según docs/arquitectura.md. El gateway quita el prefijo /api:
  *   GET   /places                              mapa
+ *   POST  /places                              negocio: crea su lugar (uno por cuenta)
+ *   GET   /places/owned                        negocio: su lugar, o 404
  *   GET   /places/:id                          ficha
  *   GET   /places/:id/reservations             panel: reservas entrantes
  *   PATCH /places/:id/slots/:slotId            panel: capacidad de una franja (CC-3)
@@ -33,6 +36,19 @@ export class BookingController {
   @Get('places')
   listPlaces(@Query('zone') zone?: Zone, @Query('category') category?: Category) {
     return this.booking.listPlaces({ zone, category });
+  }
+
+  @Roles('negocio')
+  @Post('places')
+  createPlace(@Identity() who: Identity, @Req() req: Request, @Body() body: NewPlaceInput) {
+    return this.booking.createPlace({ ...who, userName: nombreDesdeRequest(req, who.userId) }, body ?? {});
+  }
+
+  // Va antes de `places/:id` para que "owned" no se lea como un id.
+  @Roles('negocio')
+  @Get('places/owned')
+  ownedPlace(@Identity() who: Identity) {
+    return this.booking.ownedPlace(who);
   }
 
   @Get('places/:id')

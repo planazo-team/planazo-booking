@@ -14,6 +14,8 @@ export interface PlaceBase {
   lng: number;
   description: string;
   priceLevel: 0 | 1 | 2 | 3;
+  /** Portada elegida por el negocio (clave de la galería del frontend). `null` en el catálogo semilla. */
+  cover?: string | null;
 }
 
 /** Resumen para el mapa (GET /places). */

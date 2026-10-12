@@ -2,23 +2,19 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { randomInt, randomUUID } from 'node:crypto';
 import { BusService } from '../bus/bus.service';
 import type { Identity } from '../common/identity';
-import type {
-  Category,
-  Place,
-  PlaceBase,
-  PlaceDetail,
-  PlaceEvent,
-  Reservation,
-  Slot,
-  Zone,
-} from './booking.types';
-import { buildSeed } from './seed';
+import type { Category, Place, PlaceDetail, PlaceEvent, Reservation, Slot, Zone } from './booking.types';
+import { armarLugar, type NewPlaceInput } from './new-place';
+import { BOOKING_STORE, type BookingStore, type StoredPlace, type WriteFailure } from './store/booking.store';
+import { publico } from './store/memory.store';
 
 const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -28,69 +24,124 @@ function codigo(n: number): string {
   return s;
 }
 
+/** Mensajes de cada conflicto: nunca un error genérico. */
+const MENSAJE: Record<WriteFailure, { reserva: string; panel: string }> = {
+  VERSION_CONFLICT: {
+    reserva: 'Alguien reservó en esta franja mientras decidías. Actualizamos la disponibilidad: revisa y vuelve a intentar.',
+    panel: 'Otro dispositivo del equipo cambió esta franja antes que tú. Cargamos el valor actual.',
+  },
+  SIN_CUPO: {
+    reserva: 'No quedan cupos suficientes en esta franja.',
+    panel: 'No quedan cupos suficientes en esta franja.',
+  },
+  CAPACIDAD_MENOR: {
+    reserva: 'La capacidad no puede ser menor que lo ya reservado.',
+    panel: 'Ya hay cupos reservados: la capacidad no puede ser menor.',
+  },
+  FRANJA_NO_EXISTE: { reserva: 'La franja no existe.', panel: 'La franja no existe.' },
+};
+
 /**
  * Lugares, franjas, eventos y reservas.
  *
  * CC-3 (lock optimista): toda escritura sobre una franja trae la `version` que
  * el cliente leyó. Si no coincide con la actual, se rechaza con 409
- * VERSION_CONFLICT en vez de pisar el cambio de otro.
- *
- * El estado vive en memoria. La comprobación de versión y la escritura ocurren
- * en el mismo paso síncrono, sin `await` entre ellas, así que en un proceso de
- * Node nadie puede colarse en medio: es el equivalente a
- * `UPDATE slots SET ... WHERE id = $1 AND version = $2`. Al pasar a PostgreSQL
- * se reemplaza este almacén por esa consulta y la regla queda igual.
+ * VERSION_CONFLICT en vez de pisar el cambio de otro. La comparación y la
+ * escritura las hace el almacén en un solo paso (en PostgreSQL, un UPDATE con
+ * la versión en el WHERE): ver store/booking.store.ts.
  */
 @Injectable()
-export class BookingService {
-  private places: PlaceBase[];
-  private slots: Slot[];
-  private events: PlaceEvent[];
-  private reservations: Reservation[] = [];
+export class BookingService implements OnModuleInit, OnModuleDestroy {
+  constructor(
+    private readonly bus: BusService,
+    @Inject(BOOKING_STORE) private readonly store: BookingStore,
+  ) {}
 
-  constructor(private readonly bus: BusService) {
-    const seed = buildSeed();
-    this.places = seed.places;
-    this.slots = seed.slots;
-    this.events = seed.events;
+  async onModuleInit(): Promise<void> {
+    await this.store.init();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.store.close?.();
   }
 
   /* ------------------------------------------------------------------ */
   /* lecturas                                                            */
   /* ------------------------------------------------------------------ */
 
-  listPlaces(q: { zone?: Zone; category?: Category } = {}): Place[] {
-    return this.places
-      .filter((p) => (!q.zone || p.zone === q.zone) && (!q.category || p.category === q.category))
-      .map((p) => this.toPlace(p));
+  listPlaces(q: { zone?: Zone; category?: Category } = {}): Promise<Place[]> {
+    return this.store.listPlaces(q);
   }
 
-  getPlace(id: string): PlaceDetail {
-    const p = this.placeOrThrow(id);
-    return {
-      ...this.toPlace(p),
-      slots: this.slots.filter((s) => s.placeId === id).map((s) => ({ ...s })),
-      events: this.events.filter((e) => e.placeId === id).map((e) => ({ ...e })),
-      promos: [],
-    };
+  async getPlace(id: string): Promise<PlaceDetail> {
+    const p = await this.placeOrThrow(id);
+    const [slots, events, freeSeats] = await Promise.all([
+      this.store.slotsOf(id),
+      this.store.eventsOf(id),
+      this.store.freeSeats(id),
+    ]);
+    return { ...publico(p), freeSeats, slots, events, promos: [] };
   }
 
-  myReservations(userId: string): Reservation[] {
-    return this.reservations
-      .filter((r) => r.userId === userId)
-      .sort((a, b) => b.createdAt - a.createdAt);
+  /** GET /places/owned: el lugar del negocio que pregunta, o 404 si aún no tiene. */
+  async ownedPlace(who: Identity): Promise<Place> {
+    const p = await this.store.placeOwnedBy(who.userId);
+    if (!p) throw new NotFoundException({ code: 'SIN_LUGAR', message: 'Todavía no has creado tu lugar.' });
+    return { ...publico(p), freeSeats: await this.store.freeSeats(p.id) };
   }
 
-  placeReservations(who: Identity, placeId: string): Reservation[] {
+  myReservations(userId: string): Promise<Reservation[]> {
+    return this.store.reservationsOfUser(userId);
+  }
+
+  async placeReservations(who: Identity, placeId: string): Promise<Reservation[]> {
     this.assertOwnsPlace(who, placeId);
-    return this.reservations
-      .filter((r) => r.placeId === placeId)
-      .sort((a, b) => b.createdAt - a.createdAt);
+    return this.store.reservationsOfPlace(placeId);
   }
 
   /* ------------------------------------------------------------------ */
   /* escrituras                                                          */
   /* ------------------------------------------------------------------ */
+
+  /**
+   * POST /places: un negocio crea su lugar. Uno por cuenta. Se anuncia con
+   * PLACE.CREATED en su zona, así aparece en el mapa de todos sin recargar,
+   * y promo lo agrega a su catálogo para poder lanzar promociones.
+   */
+  async createPlace(who: Identity & { userName: string }, input: NewPlaceInput): Promise<Place> {
+    if (who.role !== 'negocio') {
+      throw new ForbiddenException({ code: 'ROL_NO_AUTORIZADO', message: 'Solo una cuenta de negocio puede crear un lugar.' });
+    }
+    const existente = await this.store.placeOwnedBy(who.userId);
+    if (existente) {
+      throw new ConflictException({
+        code: 'YA_TIENE_LUGAR',
+        message: `Tu cuenta ya administra ${existente.name}.`,
+        placeId: existente.id,
+      });
+    }
+
+    const id = `l-${codigo(6).toLowerCase()}`;
+    const { place, slots } = armarLugar(id, input);
+    const stored: StoredPlace = { ...place, ownerId: who.userId };
+    try {
+      await this.store.createPlace(stored, slots);
+    } catch (err) {
+      // owner_id es UNIQUE: dos altas simultáneas de la misma cuenta, solo una entra.
+      if ((err as { code?: string })?.code === '23505') {
+        throw new ConflictException({ code: 'YA_TIENE_LUGAR', message: 'Tu cuenta ya administra un lugar.' });
+      }
+      throw err;
+    }
+
+    const freeSeats = slots.length ? slots.reduce((a, s) => a + s.capacity, 0) : null;
+    const created: Place = { ...place, freeSeats };
+    await this.bus.publish('PLACE.CREATED', { place: created, ownerName: who.userName }, [
+      `zone:${place.zone}`,
+      `place:${place.id}`,
+    ]);
+    return created;
+  }
 
   /** CC-3: reserva `people` cupos en la franja si la versión leída sigue vigente. */
   async reserve(
@@ -101,41 +152,27 @@ export class BookingService {
     if (!Number.isInteger(people) || people < 1 || people > 20) {
       throw new BadRequestException({ code: 'PERSONAS_INVALIDAS', message: 'Indica entre 1 y 20 personas.' });
     }
-    const s = this.slotOrThrow(input.slotId);
-
-    // --- sección crítica: comprobar y escribir sin ceder el hilo -------
-    if (s.version !== Number(input.version)) {
-      throw new ConflictException({
-        code: 'VERSION_CONFLICT',
-        message:
-          'Alguien reservó en esta franja mientras decidías. Actualizamos la disponibilidad: revisa y vuelve a intentar.',
-      });
+    const version = Number(input.version);
+    if (!input.slotId || !Number.isInteger(version)) {
+      throw new BadRequestException({ code: 'RESERVA_INVALIDA', message: 'Falta la franja o su versión.' });
     }
-    if (s.capacity - s.taken < people) {
-      throw new ConflictException({ code: 'SIN_CUPO', message: 'No quedan cupos suficientes en esta franja.' });
-    }
-    s.taken += people;
-    s.version += 1;
-    // -------------------------------------------------------------------
 
-    const p = this.placeOrThrow(s.placeId);
-    const r: Reservation = {
-      id: randomUUID(),
-      slotId: s.id,
-      placeId: p.id,
-      placeName: p.name,
-      startsAt: s.startsAt,
-      people,
-      code: `${codigo(3)}-${codigo(3)}`,
-      userId: who.userId,
-      userName: who.userName,
-      createdAt: Date.now(),
-    };
-    this.reservations.push(r);
+    const r = await this.store.reserve(
+      { slotId: String(input.slotId), version, people },
+      {
+        id: randomUUID(),
+        code: `${codigo(3)}-${codigo(3)}`,
+        userId: who.userId,
+        userName: who.userName,
+        createdAt: Date.now(),
+      },
+    );
+    if (!r.ok) this.fallo(r.code, 'reserva');
 
-    await this.emitInventory(s);
-    await this.bus.publish('RESERVE.OK', r, [`place:${p.id}`, `user:${who.userId}`]);
-    return r;
+    const { slot, reservation } = r.value;
+    await this.emitInventory(slot);
+    await this.bus.publish('RESERVE.OK', reservation, [`place:${slot.placeId}`, `user:${who.userId}`]);
+    return reservation;
   }
 
   /** Panel del negocio: misma regla de versión, porque el staff edita desde varios dispositivos. */
@@ -145,31 +182,19 @@ export class BookingService {
   ): Promise<Slot> {
     this.assertOwnsPlace(who, input.placeId);
     const capacity = Number(input.capacity);
-    if (!Number.isInteger(capacity) || capacity < 0) {
-      throw new BadRequestException({ code: 'CAPACIDAD_INVALIDA', message: 'La capacidad debe ser un entero positivo.' });
+    if (!Number.isInteger(capacity) || capacity < 0 || capacity > 1000) {
+      throw new BadRequestException({ code: 'CAPACIDAD_INVALIDA', message: 'La capacidad debe ser un entero entre 0 y 1000.' });
     }
-    const s = this.slotOrThrow(input.slotId);
-    if (s.placeId !== input.placeId) {
+    const actual = await this.store.getSlot(input.slotId);
+    if (!actual || actual.placeId !== input.placeId) {
       throw new NotFoundException({ code: 'FRANJA_NO_EXISTE', message: 'La franja no pertenece a este lugar.' });
     }
 
-    if (s.version !== Number(input.version)) {
-      throw new ConflictException({
-        code: 'VERSION_CONFLICT',
-        message: 'Otro dispositivo del equipo cambió esta franja antes que tú. Cargamos el valor actual.',
-      });
-    }
-    if (capacity < s.taken) {
-      throw new ConflictException({
-        code: 'CAPACIDAD_MENOR',
-        message: `Ya hay ${s.taken} cupos reservados: la capacidad no puede ser menor.`,
-      });
-    }
-    s.capacity = capacity;
-    s.version += 1;
+    const r = await this.store.updateCapacity({ slotId: input.slotId, version: Number(input.version), capacity });
+    if (!r.ok) this.fallo(r.code, 'panel', r.current);
 
-    await this.emitInventory(s);
-    return { ...s };
+    await this.emitInventory(r.value);
+    return r.value;
   }
 
   async createEvent(
@@ -180,17 +205,17 @@ export class BookingService {
     this.assertOwnsPlace(who, placeId);
     const title = String(input.title ?? '').trim();
     const capacity = Number(input.capacity);
-    if (title.length < 3 || !input.startsAt || !Number.isInteger(capacity) || capacity < 1) {
+    if (title.length < 3 || title.length > 60 || !/^\d{2}:\d{2}$/.test(String(input.startsAt ?? '')) || !Number.isInteger(capacity) || capacity < 1) {
       throw new BadRequestException({
         code: 'EVENTO_INVALIDO',
-        message: 'El evento necesita título, hora y un cupo máximo mayor que cero.',
+        message: 'El evento necesita título, hora (HH:MM) y un cupo máximo mayor que cero.',
       });
     }
-    const p = this.placeOrThrow(placeId);
+    const p = await this.placeOrThrow(placeId);
     const e: PlaceEvent = { id: randomUUID(), placeId, title, startsAt: input.startsAt, capacity, taken: 0 };
-    this.events.push(e);
+    await this.store.createEvent(e);
 
-    await this.bus.publish('PLACE.UPDATE', { placeId, freeSeats: this.freeSeats(placeId) }, [
+    await this.bus.publish('PLACE.UPDATE', { placeId, freeSeats: await this.store.freeSeats(placeId) }, [
       `zone:${p.zone}`,
       `place:${placeId}`,
     ]);
@@ -201,26 +226,16 @@ export class BookingService {
   /* utilidades                                                          */
   /* ------------------------------------------------------------------ */
 
-  private freeSeats(placeId: string): number | null {
-    const slots = this.slots.filter((s) => s.placeId === placeId);
-    if (!slots.length) return null;
-    return slots.reduce((acc, s) => acc + (s.capacity - s.taken), 0);
+  private fallo(code: WriteFailure, donde: 'reserva' | 'panel', current?: Slot): never {
+    const message = MENSAJE[code][donde];
+    if (code === 'FRANJA_NO_EXISTE') throw new NotFoundException({ code, message });
+    throw new ConflictException({ code, message, ...(current ? { current } : {}) });
   }
 
-  private toPlace(p: PlaceBase): Place {
-    return { ...p, freeSeats: this.freeSeats(p.id) };
-  }
-
-  private placeOrThrow(id: string): PlaceBase {
-    const p = this.places.find((x) => x.id === id);
+  private async placeOrThrow(id: string): Promise<StoredPlace> {
+    const p = await this.store.getPlace(id);
     if (!p) throw new NotFoundException({ code: 'LUGAR_NO_EXISTE', message: 'El lugar no existe.' });
     return p;
-  }
-
-  private slotOrThrow(id: string): Slot {
-    const s = this.slots.find((x) => x.id === id);
-    if (!s) throw new NotFoundException({ code: 'FRANJA_NO_EXISTE', message: 'La franja no existe.' });
-    return s;
   }
 
   /** Un negocio solo opera su propio lugar. */
@@ -235,9 +250,11 @@ export class BookingService {
 
   /** RT-1: el cambio de la franja a quien mira la ficha y el resumen a quien mira el mapa. */
   private async emitInventory(slot: Slot): Promise<void> {
-    const p = this.places.find((x) => x.id === slot.placeId);
+    const p = await this.store.getPlace(slot.placeId);
     if (!p) return;
-    await this.bus.publish('INV.UPDATE', { placeId: p.id, slot: { ...slot } }, [`place:${p.id}`]);
-    await this.bus.publish('PLACE.UPDATE', { placeId: p.id, freeSeats: this.freeSeats(p.id) }, [`zone:${p.zone}`]);
+    await this.bus.publish('INV.UPDATE', { placeId: p.id, slot }, [`place:${p.id}`]);
+    await this.bus.publish('PLACE.UPDATE', { placeId: p.id, freeSeats: await this.store.freeSeats(p.id) }, [
+      `zone:${p.zone}`,
+    ]);
   }
 }
