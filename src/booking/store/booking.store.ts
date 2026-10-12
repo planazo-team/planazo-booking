@@ -18,6 +18,8 @@ export const BOOKING_STORE = 'planazo:bookingStore';
 
 export type WriteFailure = 'FRANJA_NO_EXISTE' | 'VERSION_CONFLICT' | 'SIN_CUPO' | 'CAPACIDAD_MENOR';
 
+export type CancelFailure = 'RESERVA_NO_EXISTE' | 'RESERVA_AJENA';
+
 export type WriteResult<T> = { ok: true; value: T } | { ok: false; code: WriteFailure; current?: Slot };
 
 /** Lugar con dueño. `ownerId` nunca sale hacia el cliente. */
@@ -51,6 +53,16 @@ export interface BookingStore {
   reserve(input: { slotId: string; version: number; people: number }, r: NewReservation): Promise<WriteResult<{ slot: Slot; reservation: Reservation }>>;
   /** CC-3 en el panel: cambia la capacidad solo si la versión sigue vigente y no queda por debajo de lo reservado. */
   updateCapacity(input: { slotId: string; version: number; capacity: number }): Promise<WriteResult<Slot>>;
+
+  /**
+   * Cancela la reserva si `puede(reserva)` lo permite: la borra y devuelve sus
+   * cupos a la franja (sube la versión). Indivisible: dos cancelaciones
+   * simultáneas de la misma reserva liberan los cupos una sola vez.
+   */
+  cancel(
+    reservationId: string,
+    puede: (r: Reservation) => boolean,
+  ): Promise<{ ok: true; value: { reservation: Reservation; slot: Slot } } | { ok: false; code: CancelFailure }>;
 
   reservationsOfUser(userId: string): Promise<Reservation[]>;
   reservationsOfPlace(placeId: string): Promise<Reservation[]>;

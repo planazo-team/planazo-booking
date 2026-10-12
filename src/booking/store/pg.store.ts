@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import { Pool, type PoolClient } from 'pg';
 import type { Category, Place, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
 import { buildSeed } from '../seed';
-import type { BookingStore, NewReservation, StoredPlace, WriteResult } from './booking.store';
+import type { BookingStore, CancelFailure, NewReservation, StoredPlace, WriteResult } from './booking.store';
 
 /**
  * Almacén en PostgreSQL, esquema `booking` (puede compartir base con otros
@@ -288,6 +288,27 @@ export class PgBookingStore implements BookingStore {
     const cur = await this.getSlot(input.slotId);
     if (!cur) return { ok: false, code: 'FRANJA_NO_EXISTE' };
     return { ok: false, code: cur.version !== input.version ? 'VERSION_CONFLICT' : 'CAPACIDAD_MENOR', current: cur };
+  }
+
+  async cancel(
+    reservationId: string,
+    puede: (r: Reservation) => boolean,
+  ): Promise<{ ok: true; value: { reservation: Reservation; slot: Slot } } | { ok: false; code: CancelFailure }> {
+    if (!/^[0-9a-f-]{36}$/i.test(reservationId)) return { ok: false, code: 'RESERVA_NO_EXISTE' };
+    return this.tx(async (c) => {
+      // FOR UPDATE: una segunda cancelación simultánea espera y ya no encuentra la fila.
+      const sel = await c.query('SELECT * FROM booking.reservations WHERE id = $1 FOR UPDATE', [reservationId]);
+      if (!sel.rows[0]) return { ok: false as const, code: 'RESERVA_NO_EXISTE' as const };
+      const reservation = toReservation(sel.rows[0]);
+      if (!puede(reservation)) return { ok: false as const, code: 'RESERVA_AJENA' as const };
+      await c.query('DELETE FROM booking.reservations WHERE id = $1', [reservationId]);
+      const upd = await c.query(
+        `UPDATE booking.slots SET taken = GREATEST(0, taken - $2), version = version + 1
+          WHERE id = $1 RETURNING *`,
+        [reservation.slotId, reservation.people],
+      );
+      return { ok: true as const, value: { reservation, slot: toSlot(upd.rows[0]) } };
+    });
   }
 
   async reservationsOfUser(userId: string) {

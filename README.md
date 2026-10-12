@@ -58,6 +58,7 @@ La columna **`version`** de `time_slots` es el corazón de CC-3. No la quites ni
 | `GET` | `/places/:id` | cliente | Ficha con franjas, cupos y la `version` de cada franja |
 | `POST` | `/reservations` | cliente | `{slot_id, people, version}` → `201` o `409` |
 | `GET` | `/reservations/mine` | cliente | Reservas activas con su código |
+| `DELETE` | `/reservations/:id` | cliente o negocio | Cancela (quien reservó o el lugar): devuelve los cupos y publica `RESERVE.CANCELLED` |
 | `GET` | `/places/:id/reservations` | negocio | Reservas entrantes de su establecimiento |
 | `PATCH` | `/places/:id/slots/:sid` | negocio | Cambia capacidad; exige `version` |
 | `POST` | `/events` | negocio | Publica un evento con cupo máximo |
