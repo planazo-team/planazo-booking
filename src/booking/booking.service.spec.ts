@@ -117,6 +117,39 @@ describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
     expect(slot.taken).toBe(8);
   });
 
+  it('cancelar devuelve los cupos, sube la versión y avisa en vivo', async () => {
+    const r = await service.reserve(cliente('u1'), { slotId: 'p7-s1', people: 2, version: 1 });
+    publish.mockClear();
+
+    await service.cancel({ userId: 'u1', role: 'cliente' }, r.id);
+
+    const slot = (await service.getPlace('p7')).slots.find((s) => s.id === 'p7-s1')!;
+    expect(slot).toMatchObject({ taken: 3, version: 3 });
+    expect(await service.myReservations('u1')).toHaveLength(0);
+    expect(publish.mock.calls.map((c) => c[0])).toEqual(['INV.UPDATE', 'PLACE.UPDATE', 'RESERVE.CANCELLED']);
+    expect(publish.mock.calls[2][2]).toEqual(['place:p7', 'user:u1']);
+  });
+
+  it('solo cancela quien reservó o el negocio dueño del lugar', async () => {
+    const r = await service.reserve(cliente('u1'), { slotId: 'p7-s1', people: 1, version: 1 });
+    expect(await codigoDe(service.cancel({ userId: 'u2', role: 'cliente' }, r.id))).toBe('RESERVA_AJENA');
+    expect(await codigoDe(service.cancel({ userId: 'b2', role: 'negocio', placeId: 'p1' }, r.id))).toBe('RESERVA_AJENA');
+    // b1 administra p7: puede cancelarla desde su panel.
+    expect(await codigoDe(service.cancel(negocio, r.id))).toBeUndefined();
+    expect(await codigoDe(service.cancel(negocio, r.id))).toBe('RESERVA_NO_EXISTE');
+  });
+
+  it('dos cancelaciones simultáneas de la misma reserva liberan los cupos una sola vez', async () => {
+    const r = await service.reserve(cliente('u1'), { slotId: 'p7-s1', people: 2, version: 1 });
+    const resultados = await Promise.all(
+      Array.from({ length: 6 }, () => codigoDe(service.cancel({ userId: 'u1', role: 'cliente' }, r.id))),
+    );
+    expect(resultados.filter((c) => c === undefined)).toHaveLength(1);
+    expect(resultados.filter((c) => c === 'RESERVA_NO_EXISTE')).toHaveLength(5);
+    const slot = (await service.getPlace('p7')).slots.find((s) => s.id === 'p7-s1')!;
+    expect(slot.taken).toBe(3); // volvió a lo del seed, no menos
+  });
+
   it('rechaza con SIN_CUPO cuando no alcanzan los cupos', async () => {
     // p7-s3: capacidad 8, ocupados 7.
     const code = await codigoDe(service.reserve(cliente('u1'), { slotId: 'p7-s3', people: 2, version: 1 }));

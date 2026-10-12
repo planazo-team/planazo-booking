@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Identity, Roles } from '../common/identity';
 import { BookingService } from './booking.service';
@@ -27,6 +27,7 @@ function nombreDesdeRequest(req: Request, fallback: string): string {
  *   PATCH /places/:id/slots/:slotId            panel: capacidad de una franja (CC-3)
  *   POST  /reservations                        reservar (CC-3)
  *   GET   /reservations/mine                   mis reservas
+ *   DELETE /reservations/:id                   cancelar (quien reservó o el lugar)
  *   POST  /events                              panel: publicar evento
  */
 @Controller()
@@ -84,6 +85,11 @@ export class BookingController {
       { ...who, userName: nombreDesdeRequest(req, who.userId) },
       { slotId: body?.slotId, people: body?.people, version: body?.version },
     );
+  }
+
+  @Delete('reservations/:id')
+  cancel(@Identity() who: Identity, @Param('id') id: string) {
+    return this.booking.cancel(who, id);
   }
 
   @Get('reservations/mine')

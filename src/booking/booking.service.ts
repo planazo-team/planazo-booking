@@ -175,6 +175,32 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
     return reservation;
   }
 
+  /**
+   * DELETE /reservations/:id: cancela quien reservó o el negocio dueño del
+   * lugar. Los cupos vuelven a la franja (con su versión nueva) y se avisa en
+   * vivo al mapa, a la ficha, al panel del negocio y a la persona.
+   */
+  async cancel(who: Identity, reservationId: string): Promise<Reservation> {
+    const r = await this.store.cancel(
+      String(reservationId ?? ''),
+      (res) => res.userId === who.userId || (who.role === 'negocio' && who.placeId === res.placeId),
+    );
+    if (!r.ok) {
+      if (r.code === 'RESERVA_AJENA') {
+        throw new ForbiddenException({ code: 'RESERVA_AJENA', message: 'Solo quien reservó o el lugar pueden cancelar esta reserva.' });
+      }
+      throw new NotFoundException({ code: 'RESERVA_NO_EXISTE', message: 'La reserva no existe o ya fue cancelada.' });
+    }
+    const { reservation, slot } = r.value;
+    await this.emitInventory(slot);
+    await this.bus.publish(
+      'RESERVE.CANCELLED',
+      { id: reservation.id, placeId: reservation.placeId, slotId: reservation.slotId, people: reservation.people, userId: reservation.userId },
+      [`place:${reservation.placeId}`, `user:${reservation.userId}`],
+    );
+    return reservation;
+  }
+
   /** Panel del negocio: misma regla de versión, porque el staff edita desde varios dispositivos. */
   async updateSlotCapacity(
     who: Identity,

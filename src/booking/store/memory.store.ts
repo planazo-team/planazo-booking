@@ -1,6 +1,6 @@
 import type { Category, Place, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
 import { buildSeed } from '../seed';
-import type { BookingStore, NewReservation, StoredPlace, WriteResult } from './booking.store';
+import type { BookingStore, CancelFailure, NewReservation, StoredPlace, WriteResult } from './booking.store';
 
 /**
  * Almacén en memoria. La comprobación de versión y la escritura ocurren en el
@@ -102,6 +102,22 @@ export class MemoryBookingStore implements BookingStore {
     s.capacity = input.capacity;
     s.version += 1;
     return { ok: true, value: { ...s } };
+  }
+
+  async cancel(
+    reservationId: string,
+    puede: (r: Reservation) => boolean,
+  ): Promise<{ ok: true; value: { reservation: Reservation; slot: Slot } } | { ok: false; code: CancelFailure }> {
+    // Comprobar, borrar y devolver cupos sin ceder el hilo: igual de indivisible que la transacción.
+    const i = this.reservations.findIndex((r) => r.id === reservationId);
+    if (i === -1) return { ok: false, code: 'RESERVA_NO_EXISTE' };
+    const r = this.reservations[i];
+    if (!puede(r)) return { ok: false, code: 'RESERVA_AJENA' };
+    this.reservations.splice(i, 1);
+    const s = this.slots.find((x) => x.id === r.slotId)!;
+    s.taken = Math.max(0, s.taken - r.people);
+    s.version += 1;
+    return { ok: true, value: { reservation: r, slot: { ...s } } };
   }
 
   async reservationsOfUser(userId: string) {
