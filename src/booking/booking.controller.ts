@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Identity, Roles } from '../common/identity';
 import { BookingService } from './booking.service';
@@ -29,10 +29,18 @@ function nombreDesdeRequest(req: Request, fallback: string): string {
  *   GET   /reservations/mine                   mis reservas
  *   DELETE /reservations/:id                   cancelar (quien reservó o el lugar)
  *   POST  /events                              panel: publicar evento
+ *   POST  /accounts/claim                      solo el gateway: nombre único al entrar
  */
 @Controller()
 export class BookingController {
   constructor(private readonly booking: BookingService) {}
+
+  // El gateway no publica /accounts: solo él la llama, con su llave.
+  @Post('accounts/claim')
+  @HttpCode(200)
+  claimAccount(@Body() body: { name?: string; deviceId?: string }) {
+    return this.booking.claimAccount(body ?? {});
+  }
 
   @Get('places')
   listPlaces(@Query('zone') zone?: Zone, @Query('category') category?: Category) {

@@ -2,7 +2,8 @@ import { Logger } from '@nestjs/common';
 import { Pool, type PoolClient } from 'pg';
 import type { Category, Place, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
 import { buildSeed } from '../seed';
-import type { BookingStore, CancelFailure, NewReservation, StoredPlace, WriteResult } from './booking.store';
+import { claveNombre } from '../cuentas';
+import type { Account, BookingStore, CancelFailure, InsertAccountResult, NewReservation, StoredPlace, WriteResult } from './booking.store';
 
 /**
  * Almacén en PostgreSQL, esquema `booking` (puede compartir base con otros
@@ -72,6 +73,24 @@ CREATE TABLE IF NOT EXISTS booking.reservations (
 );
 CREATE INDEX IF NOT EXISTS reservations_user_idx ON booking.reservations(user_id);
 CREATE INDEX IF NOT EXISTS reservations_place_idx ON booking.reservations(place_id);
+
+-- Nombres únicos: cada nombre (sin mayúsculas ni tildes) es una cuenta, atada
+-- al navegador que lo reclamó primero.
+CREATE TABLE IF NOT EXISTS booking.accounts (
+  name_key   text PRIMARY KEY,
+  name       text NOT NULL,
+  account_id text NOT NULL UNIQUE,
+  device_id  text NOT NULL,
+  created_at bigint NOT NULL DEFAULT (extract(epoch FROM now()) * 1000)::bigint
+);
+
+ALTER TABLE booking.places ADD COLUMN IF NOT EXISTS owner_name text;
+
+-- Los tres negocios creados antes de que existieran las cuentas: el nombre con
+-- que entró su dueño sale de su PLACE.CREATED en el event log de realtime.
+UPDATE booking.places SET owner_name = v.n
+  FROM (VALUES ('l-th8fpg', 'Peter Parker'), ('l-lkpug3', 'pedro'), ('l-9jqydx', 'Maria Leon')) AS v(id, n)
+ WHERE booking.places.id = v.id AND booking.places.owner_name IS NULL;
 `;
 
 type Row = Record<string, unknown>;
@@ -87,6 +106,7 @@ const toPlace = (r: Row): StoredPlace => ({
   priceLevel: Number(r.price_level) as StoredPlace['priceLevel'],
   cover: (r.cover as string | null) ?? null,
   ownerId: (r.owner_id as string | null) ?? null,
+  ownerName: (r.owner_name as string | null) ?? null,
 });
 
 const toSlot = (r: Row): Slot => ({
@@ -120,7 +140,7 @@ const toReservation = (r: Row): Reservation => ({
   createdAt: Number(r.created_at),
 });
 
-const PLACE_COLS = 'p.id, p.name, p.category, p.zone, p.lat, p.lng, p.description, p.price_level, p.cover, p.owner_id';
+const PLACE_COLS = 'p.id, p.name, p.category, p.zone, p.lat, p.lng, p.description, p.price_level, p.cover, p.owner_id, p.owner_name';
 
 export class PgBookingStore implements BookingStore {
   private readonly logger = new Logger(PgBookingStore.name);
@@ -160,6 +180,18 @@ export class PgBookingStore implements BookingStore {
           [e.id, e.placeId, e.title, e.startsAt, e.capacity, e.taken],
         );
       }
+      // Cada dueño de negocio que ya existía queda con su nombre reservado y
+      // su mismo id: sigue entrando a su lugar desde su navegador.
+      const { rows: duenos } = await c.query(
+        `SELECT owner_id, owner_name FROM booking.places WHERE owner_id LIKE 'n-%' AND owner_name IS NOT NULL`,
+      );
+      for (const d of duenos) {
+        const id = String(d.owner_id).slice(2);
+        await c.query(
+          `INSERT INTO booking.accounts (name_key, name, account_id, device_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+          [claveNombre(String(d.owner_name)), String(d.owner_name), id, id],
+        );
+      }
       await c.query('COMMIT');
       this.logger.log('Esquema booking listo y catálogo semilla cargado (PostgreSQL).');
     } catch (err) {
@@ -182,7 +214,7 @@ export class PgBookingStore implements BookingStore {
       [q.zone ?? null, q.category ?? null],
     );
     return rows.map((r) => {
-      const { ownerId: _owner, ...p } = toPlace(r);
+      const { ownerId: _owner, ownerName: _ownerName, ...p } = toPlace(r);
       return { ...p, freeSeats: r.free === null ? null : Number(r.free) };
     });
   }
@@ -223,9 +255,9 @@ export class PgBookingStore implements BookingStore {
   async createPlace(p: StoredPlace, slots: Slot[]) {
     await this.tx(async (c) => {
       await c.query(
-        `INSERT INTO booking.places (id, name, category, zone, lat, lng, description, price_level, cover, owner_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [p.id, p.name, p.category, p.zone, p.lat, p.lng, p.description, p.priceLevel, p.cover ?? null, p.ownerId ?? null],
+        `INSERT INTO booking.places (id, name, category, zone, lat, lng, description, price_level, cover, owner_id, owner_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [p.id, p.name, p.category, p.zone, p.lat, p.lng, p.description, p.priceLevel, p.cover ?? null, p.ownerId ?? null, p.ownerName ?? null],
       );
       for (const s of slots) {
         await c.query(
@@ -234,6 +266,23 @@ export class PgBookingStore implements BookingStore {
         );
       }
     });
+  }
+
+  async findAccount(nameKey: string): Promise<Account | null> {
+    const { rows } = await this.pool.query('SELECT * FROM booking.accounts WHERE name_key = $1', [nameKey]);
+    const r = rows[0];
+    return r ? { nameKey: String(r.name_key), name: String(r.name), accountId: String(r.account_id), deviceId: String(r.device_id) } : null;
+  }
+
+  async insertAccount(a: Account): Promise<InsertAccountResult> {
+    // Un solo INSERT: la PRIMARY KEY y el UNIQUE deciden si dos navegadores piden
+    // el mismo nombre a la vez. Entra uno; el otro ve 0 filas.
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO booking.accounts (name_key, name, account_id, device_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+      [a.nameKey, a.name, a.accountId, a.deviceId],
+    );
+    if (rowCount === 1) return 'ok';
+    return (await this.findAccount(a.nameKey)) ? 'NOMBRE_TOMADO' : 'ID_TOMADO';
   }
 
   async createEvent(e: PlaceEvent) {

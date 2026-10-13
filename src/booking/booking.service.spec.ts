@@ -232,4 +232,58 @@ describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
     );
     expect(await codigoDe(service.ownedPlace(dueño))).toBe('SIN_LUGAR');
   });
+  describe('nombres únicos (cuentas)', () => {
+    it('el mismo navegador vuelve a entrar con su nombre y conserva su id', async () => {
+      const a = await service.claimAccount({ name: 'Juan', deviceId: 'dispositivoA1' });
+      expect(a).toEqual({ accountId: 'dispositivoA1', name: 'Juan' });
+      expect(await service.claimAccount({ name: '  juan ', deviceId: 'dispositivoA1' })).toEqual(a);
+    });
+
+    it('otro navegador no puede usar el mismo nombre, ni con otras mayúsculas o tildes', async () => {
+      await service.claimAccount({ name: 'Juan', deviceId: 'dispositivoA1' });
+      expect(await codigoDe(service.claimAccount({ name: 'JUÁN', deviceId: 'dispositivoB2' }))).toBe('NOMBRE_EN_USO');
+      try {
+        await service.claimAccount({ name: 'Juan', deviceId: 'dispositivoB2' });
+      } catch (err) {
+        expect(((err as ConflictException).getResponse() as { suggestion?: string }).suggestion).toBe('Juan 2');
+      }
+    });
+
+    it('dos nombres en el mismo navegador son dos cuentas: Juan no hereda el negocio de Pedro', async () => {
+      // Pedro crea su negocio con la cuenta del navegador compartido.
+      const pedro = await service.claimAccount({ name: 'Pedro', deviceId: 'compartido1' });
+      await service.createPlace(
+        { userId: `n-${pedro.accountId}`, role: 'negocio', userName: 'Pedro' },
+        { name: 'Casa Tequila', category: 'bar', lat: 4.655, lng: -74.056 },
+      );
+      const juan = await service.claimAccount({ name: 'Juan', deviceId: 'compartido1' });
+      expect(juan.accountId).not.toBe(pedro.accountId);
+      expect(await codigoDe(service.ownedPlace({ userId: `n-${juan.accountId}`, role: 'negocio' }))).toBe('SIN_LUGAR');
+      expect((await service.ownedPlace({ userId: `n-${pedro.accountId}`, role: 'negocio' })).name).toBe('Casa Tequila');
+    });
+
+    it('si alguien más entra primero en el navegador del dueño, no recibe su negocio', async () => {
+      // Negocio creado antes de las cuentas: dueño n-legado con nombre Pedro.
+      await service.createPlace(
+        { userId: 'n-legado1234', role: 'negocio', userName: 'Pedro' },
+        { name: 'Casa Tequila', category: 'bar', lat: 4.655, lng: -74.056 },
+      );
+      const juan = await service.claimAccount({ name: 'Juan', deviceId: 'legado1234' });
+      expect(juan.accountId).not.toBe('legado1234');
+      const pedro = await service.claimAccount({ name: 'pedro', deviceId: 'legado1234' });
+      expect(pedro.accountId).toBe('legado1234');
+    });
+
+    it('treinta navegadores piden «Juan» a la vez: solo uno se lo queda', async () => {
+      const r = await Promise.allSettled(
+        Array.from({ length: 30 }, (_, i) => service.claimAccount({ name: 'Juan', deviceId: `simultaneo${i}xx` })),
+      );
+      expect(r.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+    });
+
+    it('rechaza nombres o dispositivos inválidos', async () => {
+      expect(await codigoDe(service.claimAccount({ name: '<b>', deviceId: 'dispositivoA1' }))).toBe('NOMBRE_INVALIDO');
+      expect(await codigoDe(service.claimAccount({ name: 'Ana', deviceId: 'x' }))).toBe('DISPOSITIVO_INVALIDO');
+    });
+  });
 });

@@ -1,6 +1,6 @@
 import type { Category, Place, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
 import { buildSeed } from '../seed';
-import type { BookingStore, CancelFailure, NewReservation, StoredPlace, WriteResult } from './booking.store';
+import type { Account, BookingStore, CancelFailure, InsertAccountResult, NewReservation, StoredPlace, WriteResult } from './booking.store';
 
 /**
  * Almacén en memoria. La comprobación de versión y la escritura ocurren en el
@@ -13,6 +13,7 @@ export class MemoryBookingStore implements BookingStore {
   private slots: Slot[];
   private events: PlaceEvent[];
   private reservations: Reservation[] = [];
+  private accounts: Account[] = [];
 
   constructor() {
     const seed = buildSeed();
@@ -120,6 +121,19 @@ export class MemoryBookingStore implements BookingStore {
     return { ok: true, value: { reservation: r, slot: { ...s } } };
   }
 
+  async findAccount(nameKey: string) {
+    const a = this.accounts.find((x) => x.nameKey === nameKey);
+    return a ? { ...a } : null;
+  }
+
+  async insertAccount(a: Account): Promise<InsertAccountResult> {
+    // Igual que la PRIMARY KEY (name_key) y el UNIQUE (account_id) de PostgreSQL.
+    if (this.accounts.some((x) => x.nameKey === a.nameKey)) return 'NOMBRE_TOMADO';
+    if (this.accounts.some((x) => x.accountId === a.accountId)) return 'ID_TOMADO';
+    this.accounts.push({ ...a });
+    return 'ok';
+  }
+
   async reservationsOfUser(userId: string) {
     return this.reservations.filter((r) => r.userId === userId).sort((a, b) => b.createdAt - a.createdAt);
   }
@@ -137,6 +151,6 @@ export class MemoryBookingStore implements BookingStore {
 
 /** Quita el dueño antes de mostrar un lugar. */
 export function publico(p: StoredPlace) {
-  const { ownerId: _owner, ...rest } = p;
+  const { ownerId: _owner, ownerName: _ownerName, ...rest } = p;
   return rest;
 }
