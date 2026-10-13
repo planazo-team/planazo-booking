@@ -56,9 +56,9 @@ describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
     await service.onModuleDestroy();
   });
 
-  it('lista los 29 lugares del seed con sus cupos libres', async () => {
+  it('lista los 43 lugares del seed con sus cupos libres', async () => {
     const places = await service.listPlaces();
-    expect(places).toHaveLength(29);
+    expect(places).toHaveLength(43);
     // Los parques públicos son gratis y sin reserva.
     expect(places.filter((p) => p.category === 'aire-libre' && p.priceLevel === 0)).toHaveLength(7);
     // p7: (8-3) + (8-6) + (8-7) = 8
