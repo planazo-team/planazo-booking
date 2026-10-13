@@ -56,9 +56,11 @@ describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
     await service.onModuleDestroy();
   });
 
-  it('lista los 12 lugares del seed con sus cupos libres', async () => {
+  it('lista los 29 lugares del seed con sus cupos libres', async () => {
     const places = await service.listPlaces();
-    expect(places).toHaveLength(12);
+    expect(places).toHaveLength(29);
+    // Los parques públicos son gratis y sin reserva.
+    expect(places.filter((p) => p.category === 'aire-libre' && p.priceLevel === 0)).toHaveLength(7);
     // p7: (8-3) + (8-6) + (8-7) = 8
     expect(places.find((p) => p.id === 'p7')?.freeSeats).toBe(8);
     // Un hotel sin franjas no maneja cupos.
@@ -67,7 +69,7 @@ describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
 
   it('filtra por zona y categoría', async () => {
     const bares = await service.listPlaces({ zone: 'zona-t', category: 'bar' });
-    expect(bares.map((p) => p.id).sort()).toEqual(['p7', 'p8']);
+    expect(bares.map((p) => p.id).sort()).toEqual(['p23', 'p7', 'p8']);
   });
 
   it('reserva con la versión vigente, sube la versión y publica el inventario', async () => {

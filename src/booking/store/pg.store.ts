@@ -161,9 +161,9 @@ export class PgBookingStore implements BookingStore {
       await c.query('BEGIN');
       for (const p of seed.places) {
         await c.query(
-          `INSERT INTO booking.places (id, name, category, zone, lat, lng, description, price_level)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING`,
-          [p.id, p.name, p.category, p.zone, p.lat, p.lng, p.description, p.priceLevel],
+          `INSERT INTO booking.places (id, name, category, zone, lat, lng, description, price_level, cover)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (id) DO NOTHING`,
+          [p.id, p.name, p.category, p.zone, p.lat, p.lng, p.description, p.priceLevel, p.cover ?? null],
         );
       }
       for (const s of seed.slots) {
