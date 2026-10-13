@@ -192,6 +192,7 @@ export class PgBookingStore implements BookingStore {
           [claveNombre(String(d.owner_name)), String(d.owner_name), id, id],
         );
       }
+      await this.repararHerencias(c);
       await c.query('COMMIT');
       this.logger.log('Esquema booking listo y catálogo semilla cargado (PostgreSQL).');
     } catch (err) {
@@ -200,6 +201,38 @@ export class PgBookingStore implements BookingStore {
     } finally {
       await c.query(`SELECT pg_advisory_unlock(hashtext('planazo-booking-init'))`).catch(() => undefined);
       c.release();
+    }
+  }
+
+  /**
+   * Repara las cuentas que heredaron el id de su navegador junto con datos de
+   * otra persona (reservas o negocio hechos antes con otro nombre). La cuenta
+   * recibe un id nuevo y se lleva solo lo que hizo con su nombre después de
+   * reclamarlo; lo anterior se queda con el id viejo, de quien lo hizo.
+   */
+  private async repararHerencias(c: PoolClient): Promise<void> {
+    const { rows: cuentas } = await c.query(
+      `SELECT name_key, name, account_id, created_at FROM booking.accounts WHERE account_id = device_id`,
+    );
+    for (const a of cuentas) {
+      const id = String(a.account_id);
+      const desde = Number(a.created_at);
+      const { rows: previas } = await c.query(
+        `SELECT user_name FROM booking.reservations WHERE user_id = $1 AND created_at < $2`,
+        [`c-${id}`, desde],
+      );
+      const { rows: lugar } = await c.query(`SELECT owner_name FROM booking.places WHERE owner_id = $1`, [`n-${id}`]);
+      const ajenas = previas.some((r) => claveNombre(String(r.user_name)) !== a.name_key);
+      const negocioAjeno = !!lugar[0]?.owner_name && claveNombre(String(lugar[0].owner_name)) !== a.name_key;
+      if (!ajenas && !negocioAjeno) continue;
+
+      const nuevo = `${id}${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      await c.query('UPDATE booking.accounts SET account_id = $1 WHERE name_key = $2', [nuevo, a.name_key]);
+      await c.query(
+        `UPDATE booking.reservations SET user_id = $1 WHERE user_id = $2 AND created_at >= $3`,
+        [`c-${nuevo}`, `c-${id}`, desde],
+      );
+      this.logger.warn(`Cuenta «${a.name}» separada de datos de otra persona del mismo navegador.`);
     }
   }
 
