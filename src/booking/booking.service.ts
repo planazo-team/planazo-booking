@@ -137,10 +137,15 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
         });
       }
 
-      // El primer nombre de este navegador conserva el id de antes (sus
-      // reservas y su negocio), salvo que ese negocio sea de otra persona.
+      // El id que este navegador usaba antes de los nombres únicos (sus
+      // reservas y su negocio) solo se hereda si esos datos son de esta misma
+      // persona: mismo nombre en el negocio y en todas sus reservas. Si no,
+      // «Pedro 2» vería las reservas que hizo «pedro» en este computador.
       const negocio = await this.store.placeOwnedBy(`n-${deviceId}`);
-      const heredaId = !negocio?.ownerName || claveNombre(negocio.ownerName) === nameKey;
+      const reservas = await this.store.reservationsOfUser(`c-${deviceId}`);
+      const heredaId =
+        (!negocio?.ownerName || claveNombre(negocio.ownerName) === nameKey) &&
+        reservas.every((r) => claveNombre(r.userName) === nameKey);
       const candidatos = heredaId ? [deviceId, `${deviceId}${codigo(6)}`] : [`${deviceId}${codigo(6)}`];
       for (const accountId of candidatos) {
         const r = await this.store.insertAccount({ nameKey, name, accountId, deviceId });

@@ -276,6 +276,38 @@ describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
       expect(pedro.accountId).toBe('legado1234');
     });
 
+    it('otro nombre en el navegador no hereda las reservas que se hicieron con otro nombre', async () => {
+      // Antes de los nombres únicos, «pedro» reservó con el id del navegador.
+      const slot = (await service.getPlace('p7')).slots[0];
+      await service.reserve({ userId: 'c-navegadorPedro1', role: 'cliente', userName: 'pedro' }, { slotId: slot.id, version: slot.version, people: 2 });
+
+      const pedro2 = await service.claimAccount({ name: 'Pedro 2', deviceId: 'navegadorPedro1' });
+      expect(pedro2.accountId).not.toBe('navegadorPedro1');
+      expect(await service.myReservations(`c-${pedro2.accountId}`)).toHaveLength(0);
+
+      // Quien sí hizo esas reservas las conserva.
+      const pedro = await service.claimAccount({ name: 'pedro', deviceId: 'navegadorPedro1' });
+      expect(pedro.accountId).toBe('navegadorPedro1');
+      expect(await service.myReservations(`c-${pedro.accountId}`)).toHaveLength(1);
+    });
+
+    it('al arrancar, PostgreSQL separa la cuenta que ya había heredado reservas ajenas', async () => {
+      if (_nombre !== 'postgres') return;
+      const slot = (await service.getPlace('p7')).slots[0];
+      await service.reserve({ userId: 'c-heredado123', role: 'cliente', userName: 'pedro' }, { slotId: slot.id, version: slot.version, people: 1 });
+      await new Promise((r) => setTimeout(r, 5));
+      // Así quedó en producción antes del arreglo: «Pedro 2» con el id del navegador.
+      await store.insertAccount({ nameKey: 'pedro 2', name: 'Pedro 2', accountId: 'heredado123', deviceId: 'heredado123' });
+
+      const otra = new PgBookingStore(PG_URL!);
+      await otra.init();
+      const cuenta = await otra.findAccount('pedro 2');
+      expect(cuenta?.accountId).not.toBe('heredado123');
+      expect(await otra.reservationsOfUser(`c-${cuenta?.accountId}`)).toHaveLength(0);
+      expect(await otra.reservationsOfUser('c-heredado123')).toHaveLength(1);
+      await otra.close?.();
+    });
+
     it('treinta navegadores piden «Juan» a la vez: solo uno se lo queda', async () => {
       const r = await Promise.allSettled(
         Array.from({ length: 30 }, (_, i) => service.claimAccount({ name: 'Juan', deviceId: `simultaneo${i}xx` })),
