@@ -22,8 +22,23 @@ export type CancelFailure = 'RESERVA_NO_EXISTE' | 'RESERVA_AJENA';
 
 export type WriteResult<T> = { ok: true; value: T } | { ok: false; code: WriteFailure; current?: Slot };
 
-/** Lugar con dueño. `ownerId` nunca sale hacia el cliente. */
-export type StoredPlace = PlaceBase & { ownerId?: string | null };
+/** Lugar con dueño. `ownerId` y `ownerName` nunca salen hacia el cliente. */
+export type StoredPlace = PlaceBase & { ownerId?: string | null; ownerName?: string | null };
+
+/**
+ * Una cuenta: un nombre único (sin distinguir mayúsculas ni tildes) atado al
+ * navegador que lo reclamó primero. `accountId` es lo que el gateway pone en
+ * el token (`c-<accountId>` o `n-<accountId>`).
+ */
+export interface Account {
+  nameKey: string;
+  name: string;
+  accountId: string;
+  deviceId: string;
+}
+
+/** Resultado de reclamar una cuenta: entra, o choca por el nombre o por el id. */
+export type InsertAccountResult = 'ok' | 'NOMBRE_TOMADO' | 'ID_TOMADO';
 
 export interface NewReservation {
   id: string;
@@ -63,6 +78,11 @@ export interface BookingStore {
     reservationId: string,
     puede: (r: Reservation) => boolean,
   ): Promise<{ ok: true; value: { reservation: Reservation; slot: Slot } } | { ok: false; code: CancelFailure }>;
+
+  /** La cuenta dueña de un nombre (clave normalizada), o `null`. */
+  findAccount(nameKey: string): Promise<Account | null>;
+  /** Inserta la cuenta solo si ni el nombre ni el id están tomados; indivisible. */
+  insertAccount(a: Account): Promise<InsertAccountResult>;
 
   reservationsOfUser(userId: string): Promise<Reservation[]>;
   reservationsOfPlace(placeId: string): Promise<Reservation[]>;

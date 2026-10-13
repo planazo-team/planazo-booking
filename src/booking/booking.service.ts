@@ -12,6 +12,7 @@ import { randomInt, randomUUID } from 'node:crypto';
 import { BusService } from '../bus/bus.service';
 import type { Identity } from '../common/identity';
 import type { Category, Place, PlaceDetail, PlaceEvent, Reservation, Slot, Zone } from './booking.types';
+import { claveNombre, DISPOSITIVO, limpiarNombre, NOMBRE } from './cuentas';
 import { armarLugar, type NewPlaceInput } from './new-place';
 import { BOOKING_STORE, type BookingStore, type StoredPlace, type WriteFailure } from './store/booking.store';
 import { publico } from './store/memory.store';
@@ -104,6 +105,62 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
   /* ------------------------------------------------------------------ */
 
   /**
+   * POST /accounts/claim { name, deviceId } → { accountId, name }. Solo lo llama
+   * el gateway al hacer login (la ruta no se publica).
+   *
+   * Cada nombre es una cuenta: el primer navegador que lo usa se queda con él.
+   * Ese mismo navegador vuelve a entrar con su nombre cuando quiera; otro
+   * navegador recibe 409 NOMBRE_EN_USO con una sugerencia libre. Y un mismo
+   * navegador con dos nombres son dos cuentas distintas (Juan no hereda el
+   * negocio de Pedro por compartir el computador).
+   */
+  async claimAccount(input: { name?: string; deviceId?: string }): Promise<{ accountId: string; name: string }> {
+    const name = limpiarNombre(input?.name ?? '');
+    const deviceId = String(input?.deviceId ?? '');
+    if (!NOMBRE.test(name)) {
+      throw new BadRequestException({ code: 'NOMBRE_INVALIDO', message: 'Escribe un nombre de 2 a 30 letras (sin símbolos raros).' });
+    }
+    if (!DISPOSITIVO.test(deviceId)) {
+      throw new BadRequestException({ code: 'DISPOSITIVO_INVALIDO', message: 'Falta el identificador del dispositivo.' });
+    }
+    const nameKey = claveNombre(name);
+
+    for (let intento = 0; intento < 4; intento++) {
+      const cuenta = await this.store.findAccount(nameKey);
+      if (cuenta) {
+        if (cuenta.deviceId === deviceId) return { accountId: cuenta.accountId, name: cuenta.name };
+        const sugerencia = await this.nombreLibre(name);
+        throw new ConflictException({
+          code: 'NOMBRE_EN_USO',
+          message: `«${cuenta.name}» ya lo está usando otra persona.${sugerencia ? ` Prueba con «${sugerencia}».` : ''}`,
+          suggestion: sugerencia,
+        });
+      }
+
+      // El primer nombre de este navegador conserva el id de antes (sus
+      // reservas y su negocio), salvo que ese negocio sea de otra persona.
+      const negocio = await this.store.placeOwnedBy(`n-${deviceId}`);
+      const heredaId = !negocio?.ownerName || claveNombre(negocio.ownerName) === nameKey;
+      const candidatos = heredaId ? [deviceId, `${deviceId}${codigo(6)}`] : [`${deviceId}${codigo(6)}`];
+      for (const accountId of candidatos) {
+        const r = await this.store.insertAccount({ nameKey, name, accountId, deviceId });
+        if (r === 'ok') return { accountId, name };
+        if (r === 'NOMBRE_TOMADO') break; // alguien lo tomó en este instante: vuelve a mirar
+      }
+    }
+    throw new ConflictException({ code: 'NOMBRE_EN_USO', message: `«${name}» ya lo está usando otra persona.` });
+  }
+
+  /** «Juan 2», «Juan 3»… el primero que esté libre. */
+  private async nombreLibre(name: string): Promise<string | null> {
+    for (let n = 2; n < 100; n++) {
+      const candidato = `${name.slice(0, 30 - String(n).length - 1)} ${n}`;
+      if (!(await this.store.findAccount(claveNombre(candidato)))) return candidato;
+    }
+    return null;
+  }
+
+  /**
    * POST /places: un negocio crea su lugar. Uno por cuenta. Se anuncia con
    * PLACE.CREATED en su zona, así aparece en el mapa de todos sin recargar,
    * y promo lo agrega a su catálogo para poder lanzar promociones.
@@ -123,7 +180,7 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
 
     const id = `l-${codigo(6).toLowerCase()}`;
     const { place, slots } = armarLugar(id, input);
-    const stored: StoredPlace = { ...place, ownerId: who.userId };
+    const stored: StoredPlace = { ...place, ownerId: who.userId, ownerName: who.userName };
     try {
       await this.store.createPlace(stored, slots);
     } catch (err) {
