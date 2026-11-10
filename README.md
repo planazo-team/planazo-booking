@@ -1,5 +1,7 @@
 # planazo-booking
 
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=planazo-team_planazo-booking&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=planazo-team_planazo-booking) [![Cobertura](https://sonarcloud.io/api/project_badges/measure?project=planazo-team_planazo-booking&metric=coverage)](https://sonarcloud.io/component_measures?id=planazo-team_planazo-booking&metric=coverage)
+
 **Inventario y reservas.** Fuente de verdad de la disponibilidad: todo lo que tenga que ver con *cuántos cupos quedan* pasa por aquí.
 
 | | |
