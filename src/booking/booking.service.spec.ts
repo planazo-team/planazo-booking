@@ -234,6 +234,72 @@ describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
     );
     expect(await codigoDe(service.ownedPlace(dueño))).toBe('SIN_LUGAR');
   });
+  describe('cuentas de Google y modo negocio', () => {
+    const ana = { googleSub: '1098765432101', email: 'Ana@Gmail.com', name: 'Ana María' };
+    // NIT con dígito de verificación correcto (DIAN).
+    const negocioValido = { legalName: 'Bar La Telaraña S.A.S.', nit: '900.123.456-8', phone: '310 555 1234', acceptTerms: true };
+
+    it('la primera vez crea la cuenta, que entra como cliente; volver a entrar da la misma', async () => {
+      const nueva = await service.googleAccount(ana);
+      expect(nueva).toMatchObject({ name: 'Ana María', email: 'ana@gmail.com', negocio: false });
+      expect(nueva.accountId).toMatch(/^g[A-Z2-9]{12}$/);
+      expect(await service.googleAccount(ana)).toEqual(nueva);
+    });
+
+    it('registrar el negocio activa el modo negocio de esa cuenta', async () => {
+      const { accountId } = await service.googleAccount(ana);
+      expect(await service.registerBusiness(accountId, negocioValido)).toEqual({
+        accountId,
+        negocio: true,
+        legalName: 'Bar La Telaraña S.A.S.',
+      });
+      expect((await service.googleAccount(ana)).negocio).toBe(true);
+      expect((await service.accountById(accountId)).negocio).toBe(true);
+      // Reintento (doble clic): no falla ni duplica.
+      expect((await service.registerBusiness(accountId, negocioValido)).negocio).toBe(true);
+    });
+
+    it('un NIT solo puede quedar en una cuenta', async () => {
+      const a = await service.googleAccount(ana);
+      const b = await service.googleAccount({ googleSub: '2', email: 'otro@gmail.com', name: 'Otro' });
+      await service.registerBusiness(a.accountId, negocioValido);
+      expect(await codigoDe(service.registerBusiness(b.accountId, { ...negocioValido, nit: '9001234568' }))).toBe('NIT_EN_USO');
+      expect((await service.accountById(b.accountId)).negocio).toBe(false);
+    });
+
+    it('dos cuentas que registran el mismo NIT a la vez: solo una lo consigue', async () => {
+      const cuentas = await Promise.all(
+        Array.from({ length: 8 }, (_, i) => service.googleAccount({ googleSub: `s${i}`, email: `s${i}@gmail.com`, name: `S${i}` })),
+      );
+      const r = await Promise.allSettled(cuentas.map((c) => service.registerBusiness(c.accountId, negocioValido)));
+      expect(r.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+    });
+
+    it('valida NIT (dígito de verificación), teléfono, razón social y términos en el servidor', async () => {
+      const { accountId } = await service.googleAccount(ana);
+      const con = (cambio: object) => codigoDe(service.registerBusiness(accountId, { ...negocioValido, ...cambio }));
+      expect(await con({ nit: '900.123.456-7' })).toBe('NIT_INVALIDO');
+      expect(await con({ nit: '12345' })).toBe('NIT_INVALIDO');
+      expect(await con({ nit: '0123456789-0' })).toBe('NIT_INVALIDO');
+      expect(await con({ phone: '555 1234' })).toBe('TELEFONO_INVALIDO');
+      expect(await con({ legalName: '<b>' })).toBe('RAZON_SOCIAL_INVALIDA');
+      expect(await con({ acceptTerms: false })).toBe('TERMINOS_REQUERIDOS');
+      expect(await codigoDe(service.registerBusiness('gNOEXISTE2345', negocioValido))).toBe('CUENTA_NO_EXISTE');
+      expect((await service.accountById(accountId)).negocio).toBe(false);
+    });
+
+    it('dos pestañas que entran a la vez terminan en la misma cuenta', async () => {
+      const r = await Promise.all(Array.from({ length: 10 }, () => service.googleAccount(ana)));
+      expect(new Set(r.map((x) => x.accountId)).size).toBe(1);
+    });
+
+    it('sin nombre usa el correo; rechaza identidades inválidas', async () => {
+      expect((await service.googleAccount({ googleSub: '55', email: 'luis.p@escuelaing.edu.co', name: '  ' })).name).toBe('luis.p');
+      expect(await codigoDe(service.googleAccount({ googleSub: '', email: 'a@b.co' }))).toBe('CUENTA_GOOGLE_INVALIDA');
+      expect(await codigoDe(service.googleAccount({ googleSub: '1', email: 'sin-arroba' }))).toBe('CUENTA_GOOGLE_INVALIDA');
+    });
+  });
+
   describe('nombres únicos (cuentas)', () => {
     it('el mismo navegador vuelve a entrar con su nombre y conserva su id', async () => {
       const a = await service.claimAccount({ name: 'Juan', deviceId: 'dispositivoA1' });

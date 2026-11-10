@@ -30,6 +30,9 @@ function nombreDesdeRequest(req: Request, fallback: string): string {
  *   DELETE /reservations/:id                   cancelar (quien reservó o el lugar)
  *   POST  /events                              panel: publicar evento
  *   POST  /accounts/claim                      solo el gateway: nombre único al entrar
+ *   POST  /accounts/google                     solo el gateway: cuenta de Google
+ *   GET   /accounts/:accountId                 solo el gateway: ¿tiene modo negocio?
+ *   POST  /accounts/:accountId/negocio         solo el gateway: activar el modo negocio
  */
 @Controller()
 export class BookingController {
@@ -40,6 +43,26 @@ export class BookingController {
   @HttpCode(200)
   claimAccount(@Body() body: { name?: string; deviceId?: string }) {
     return this.booking.claimAccount(body ?? {});
+  }
+
+  @Post('accounts/google')
+  @HttpCode(200)
+  googleAccount(@Body() body: { googleSub?: string; email?: string; name?: string }) {
+    return this.booking.googleAccount(body ?? {});
+  }
+
+  @Get('accounts/:accountId')
+  account(@Param('accountId') accountId: string) {
+    return this.booking.accountById(accountId);
+  }
+
+  @Post('accounts/:accountId/negocio')
+  @HttpCode(200)
+  registerBusiness(
+    @Param('accountId') accountId: string,
+    @Body() body: { legalName?: string; nit?: string; phone?: string; acceptTerms?: boolean },
+  ) {
+    return this.booking.registerBusiness(accountId, body ?? {});
   }
 
   @Get('places')

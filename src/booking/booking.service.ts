@@ -12,7 +12,20 @@ import { randomInt, randomUUID } from 'node:crypto';
 import { BusService } from '../bus/bus.service';
 import type { Identity } from '../common/identity';
 import type { Category, Place, PlaceDetail, PlaceEvent, Reservation, Slot, Zone } from './booking.types';
-import { claveNombre, DISPOSITIVO, limpiarNombre, NOMBRE } from './cuentas';
+import {
+  claveNombre,
+  CORREO,
+  CUENTA_GOOGLE,
+  DISPOSITIVO,
+  GOOGLE_SUB,
+  limpiarNombre,
+  NOMBRE,
+  nitValido,
+  nombreDeGoogle,
+  razonSocialValida,
+  telefonoValido,
+  TERMINOS_NEGOCIO,
+} from './cuentas';
 import { armarLugar, type NewPlaceInput } from './new-place';
 import { BOOKING_STORE, type BookingStore, type StoredPlace, type WriteFailure } from './store/booking.store';
 import { publico } from './store/memory.store';
@@ -154,6 +167,70 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
       }
     }
     throw new ConflictException({ code: 'NOMBRE_EN_USO', message: `«${name}» ya lo está usando otra persona.` });
+  }
+
+  /**
+   * POST /accounts/google { googleSub, email, name } → { accountId, name, email, negocio }.
+   * Solo lo llama el gateway, después de verificar el ID token de Google.
+   * La primera vez crea la cuenta. `negocio` dice si ya activó el modo negocio.
+   */
+  async googleAccount(input: { googleSub?: string; email?: string; name?: string }) {
+    const googleSub = String(input?.googleSub ?? '');
+    const email = String(input?.email ?? '').trim().toLowerCase();
+    if (!GOOGLE_SUB.test(googleSub) || !CORREO.test(email)) {
+      throw new BadRequestException({ code: 'CUENTA_GOOGLE_INVALIDA', message: 'La identidad de Google llegó incompleta.' });
+    }
+    let cuenta = await this.store.findGoogleAccount(googleSub);
+    for (let intento = 0; !cuenta && intento < 4; intento++) {
+      const nueva = { googleSub, email, name: nombreDeGoogle(input?.name ?? '', email), accountId: `g${codigo(12)}` };
+      const r = await this.store.insertGoogleAccount(nueva);
+      if (r === 'ok') cuenta = nueva;
+      else if (r === 'YA_EXISTE') cuenta = await this.store.findGoogleAccount(googleSub);
+    }
+    if (!cuenta) throw new ConflictException({ code: 'CUENTA_NO_CREADA', message: 'No pudimos crear tu cuenta. Intenta de nuevo.' });
+    return { ...this.publicaCuenta(cuenta), negocio: !!(await this.store.businessProfileOf(cuenta.accountId)) };
+  }
+
+  /** GET /accounts/:accountId → { accountId, name, email, negocio }. Para cambiar de modo. */
+  async accountById(accountId: string) {
+    const cuenta = CUENTA_GOOGLE.test(accountId) ? await this.store.findGoogleAccountById(accountId) : null;
+    if (!cuenta) throw new NotFoundException({ code: 'CUENTA_NO_EXISTE', message: 'La cuenta no existe.' });
+    return { ...this.publicaCuenta(cuenta), negocio: !!(await this.store.businessProfileOf(accountId)) };
+  }
+
+  private publicaCuenta(c: { accountId: string; name: string; email: string }) {
+    return { accountId: c.accountId, name: c.name, email: c.email };
+  }
+
+  /**
+   * POST /accounts/:accountId/negocio { legalName, nit, phone, acceptTerms } → { accountId, negocio, legalName }.
+   * Activa el modo negocio. Todo se valida aquí, no en el navegador: razón
+   * social, NIT con su dígito de verificación (DIAN), teléfono colombiano y la
+   * aceptación de los términos. El NIT es único entre todas las cuentas.
+   */
+  async registerBusiness(accountId: string, input: { legalName?: string; nit?: string; phone?: string; acceptTerms?: boolean }) {
+    if (!CUENTA_GOOGLE.test(accountId) || !(await this.store.findGoogleAccountById(accountId))) {
+      throw new NotFoundException({ code: 'CUENTA_NO_EXISTE', message: 'La cuenta no existe.' });
+    }
+    const legalName = razonSocialValida(input?.legalName ?? '');
+    if (!legalName) throw new BadRequestException({ code: 'RAZON_SOCIAL_INVALIDA', message: 'Escribe la razón social del negocio (3 a 120 caracteres).' });
+    const nit = nitValido(input?.nit ?? '');
+    if (!nit) {
+      throw new BadRequestException({ code: 'NIT_INVALIDO', message: 'El NIT no es válido: revisa los números y el dígito de verificación.' });
+    }
+    const phone = telefonoValido(input?.phone ?? '');
+    if (!phone) throw new BadRequestException({ code: 'TELEFONO_INVALIDO', message: 'Escribe un celular o fijo de Colombia (10 dígitos).' });
+    if (input?.acceptTerms !== true) {
+      throw new BadRequestException({ code: 'TERMINOS_REQUERIDOS', message: 'Debes aceptar los términos para negocios.' });
+    }
+
+    const r = await this.store.insertBusinessProfile({ accountId, legalName, nit, phone, termsVersion: TERMINOS_NEGOCIO, acceptedAt: Date.now() });
+    if (r === 'NIT_EN_USO') {
+      throw new ConflictException({ code: 'NIT_EN_USO', message: 'Ese NIT ya está registrado en otra cuenta. Si es tuyo, escríbenos.' });
+    }
+    // YA_ES_NEGOCIO: el registro ya existía (doble clic o reintento); se responde igual.
+    const perfil = await this.store.businessProfileOf(accountId);
+    return { accountId, negocio: true, legalName: perfil?.legalName ?? legalName };
   }
 
   /** «Juan 2», «Juan 3»… el primero que esté libre. */

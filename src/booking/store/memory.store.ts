@@ -1,6 +1,18 @@
 import type { Category, Place, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
 import { buildSeed } from '../seed';
-import type { Account, BookingStore, CancelFailure, InsertAccountResult, NewReservation, StoredPlace, WriteResult } from './booking.store';
+import type {
+  Account,
+  BookingStore,
+  CancelFailure,
+  BusinessProfile,
+  GoogleAccount,
+  InsertAccountResult,
+  InsertBusinessResult,
+  InsertGoogleResult,
+  NewReservation,
+  StoredPlace,
+  WriteResult,
+} from './booking.store';
 
 /**
  * Almacén en memoria. La comprobación de versión y la escritura ocurren en el
@@ -14,6 +26,8 @@ export class MemoryBookingStore implements BookingStore {
   private events: PlaceEvent[];
   private reservations: Reservation[] = [];
   private accounts: Account[] = [];
+  private googleAccounts: GoogleAccount[] = [];
+  private businessProfiles: BusinessProfile[] = [];
 
   constructor() {
     const seed = buildSeed();
@@ -119,6 +133,37 @@ export class MemoryBookingStore implements BookingStore {
     s.taken = Math.max(0, s.taken - r.people);
     s.version += 1;
     return { ok: true, value: { reservation: r, slot: { ...s } } };
+  }
+
+  async findGoogleAccount(googleSub: string) {
+    const a = this.googleAccounts.find((x) => x.googleSub === googleSub);
+    return a ? { ...a } : null;
+  }
+
+  async insertGoogleAccount(a: GoogleAccount): Promise<InsertGoogleResult> {
+    // Igual que la PRIMARY KEY (google_sub) y el UNIQUE (account_id) de PostgreSQL.
+    if (this.googleAccounts.some((x) => x.googleSub === a.googleSub)) return 'YA_EXISTE';
+    if (this.googleAccounts.some((x) => x.accountId === a.accountId)) return 'ID_TOMADO';
+    this.googleAccounts.push({ ...a });
+    return 'ok';
+  }
+
+  async findGoogleAccountById(accountId: string) {
+    const a = this.googleAccounts.find((x) => x.accountId === accountId);
+    return a ? { ...a } : null;
+  }
+
+  async businessProfileOf(accountId: string) {
+    const p = this.businessProfiles.find((x) => x.accountId === accountId);
+    return p ? { ...p } : null;
+  }
+
+  async insertBusinessProfile(p: BusinessProfile): Promise<InsertBusinessResult> {
+    // Igual que la PRIMARY KEY (account_id) y el UNIQUE (nit) de PostgreSQL.
+    if (this.businessProfiles.some((x) => x.accountId === p.accountId)) return 'YA_ES_NEGOCIO';
+    if (this.businessProfiles.some((x) => x.nit === p.nit)) return 'NIT_EN_USO';
+    this.businessProfiles.push({ ...p });
+    return 'ok';
   }
 
   async findAccount(nameKey: string) {

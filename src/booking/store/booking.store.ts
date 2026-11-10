@@ -40,6 +40,38 @@ export interface Account {
 /** Resultado de reclamar una cuenta: entra, o choca por el nombre o por el id. */
 export type InsertAccountResult = 'ok' | 'NOMBRE_TOMADO' | 'ID_TOMADO';
 
+/**
+ * Una cuenta de Google. `googleSub` es el id estable que Google da a cada
+ * persona (no cambia aunque cambie el correo). `accountId` es lo que el
+ * gateway pone en el token: `c-<accountId>` en modo cliente y `n-<accountId>`
+ * en modo negocio. Toda cuenta puede ser cliente; el modo negocio se activa
+ * registrando el negocio (`BusinessProfile`).
+ */
+export interface GoogleAccount {
+  googleSub: string;
+  email: string;
+  name: string;
+  accountId: string;
+}
+
+/**
+ * Lo que se pide para activar el modo negocio. El NIT es único: un negocio
+ * (persona jurídica o natural) solo puede quedar registrado en una cuenta.
+ */
+export interface BusinessProfile {
+  accountId: string;
+  legalName: string;
+  /** Sin puntos ni guion: la base seguida del dígito de verificación. */
+  nit: string;
+  phone: string;
+  termsVersion: string;
+  acceptedAt: number;
+}
+
+export type InsertBusinessResult = 'ok' | 'YA_ES_NEGOCIO' | 'NIT_EN_USO';
+
+export type InsertGoogleResult = 'ok' | 'YA_EXISTE' | 'ID_TOMADO';
+
 export interface NewReservation {
   id: string;
   code: string;
@@ -78,6 +110,15 @@ export interface BookingStore {
     reservationId: string,
     puede: (r: Reservation) => boolean,
   ): Promise<{ ok: true; value: { reservation: Reservation; slot: Slot } } | { ok: false; code: CancelFailure }>;
+
+  /** La cuenta de Google con ese `sub`, o `null`. */
+  findGoogleAccount(googleSub: string): Promise<GoogleAccount | null>;
+  /** Un solo INSERT: si dos pestañas entran a la vez con la misma cuenta, gana una. */
+  insertGoogleAccount(a: GoogleAccount): Promise<InsertGoogleResult>;
+  findGoogleAccountById(accountId: string): Promise<GoogleAccount | null>;
+  businessProfileOf(accountId: string): Promise<BusinessProfile | null>;
+  /** Un solo INSERT: la cuenta y el NIT son únicos. Indivisible ante pedidos simultáneos. */
+  insertBusinessProfile(p: BusinessProfile): Promise<InsertBusinessResult>;
 
   /** La cuenta dueña de un nombre (clave normalizada), o `null`. */
   findAccount(nameKey: string): Promise<Account | null>;

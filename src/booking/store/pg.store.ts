@@ -3,7 +3,19 @@ import { Pool, type PoolClient } from 'pg';
 import type { Category, Place, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
 import { buildSeed } from '../seed';
 import { claveNombre } from '../cuentas';
-import type { Account, BookingStore, CancelFailure, InsertAccountResult, NewReservation, StoredPlace, WriteResult } from './booking.store';
+import type {
+  Account,
+  BookingStore,
+  CancelFailure,
+  BusinessProfile,
+  GoogleAccount,
+  InsertAccountResult,
+  InsertBusinessResult,
+  InsertGoogleResult,
+  NewReservation,
+  StoredPlace,
+  WriteResult,
+} from './booking.store';
 
 /**
  * Almacén en PostgreSQL, esquema `booking` (puede compartir base con otros
@@ -84,6 +96,25 @@ CREATE TABLE IF NOT EXISTS booking.accounts (
   created_at bigint NOT NULL DEFAULT (extract(epoch FROM now()) * 1000)::bigint
 );
 
+-- Cuentas de Google: se entra solo con Google. Toda cuenta puede ser cliente.
+CREATE TABLE IF NOT EXISTS booking.google_accounts (
+  google_sub text PRIMARY KEY,
+  email      text NOT NULL,
+  name       text NOT NULL,
+  account_id text NOT NULL UNIQUE,
+  created_at bigint NOT NULL DEFAULT (extract(epoch FROM now()) * 1000)::bigint
+);
+
+-- El modo negocio se activa con estos datos. Un NIT, un negocio.
+CREATE TABLE IF NOT EXISTS booking.business_profiles (
+  account_id    text PRIMARY KEY REFERENCES booking.google_accounts(account_id),
+  legal_name    text NOT NULL,
+  nit           text NOT NULL UNIQUE,
+  phone         text NOT NULL,
+  terms_version text NOT NULL,
+  accepted_at   bigint NOT NULL
+);
+
 ALTER TABLE booking.places ADD COLUMN IF NOT EXISTS owner_name text;
 
 -- Los tres negocios creados antes de que existieran las cuentas: el nombre con
@@ -94,6 +125,22 @@ UPDATE booking.places SET owner_name = v.n
 `;
 
 type Row = Record<string, unknown>;
+
+const toGoogle = (r: Row): GoogleAccount => ({
+  googleSub: String(r.google_sub),
+  email: String(r.email),
+  name: String(r.name),
+  accountId: String(r.account_id),
+});
+
+const toBusiness = (r: Row): BusinessProfile => ({
+  accountId: String(r.account_id),
+  legalName: String(r.legal_name),
+  nit: String(r.nit),
+  phone: String(r.phone),
+  termsVersion: String(r.terms_version),
+  acceptedAt: Number(r.accepted_at),
+});
 
 const toPlace = (r: Row): StoredPlace => ({
   id: String(r.id),
@@ -299,6 +346,41 @@ export class PgBookingStore implements BookingStore {
         );
       }
     });
+  }
+
+  async findGoogleAccount(googleSub: string): Promise<GoogleAccount | null> {
+    const { rows } = await this.pool.query('SELECT * FROM booking.google_accounts WHERE google_sub = $1', [googleSub]);
+    return rows[0] ? toGoogle(rows[0]) : null;
+  }
+
+  async insertGoogleAccount(a: GoogleAccount): Promise<InsertGoogleResult> {
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO booking.google_accounts (google_sub, email, name, account_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+      [a.googleSub, a.email, a.name, a.accountId],
+    );
+    if (rowCount === 1) return 'ok';
+    return (await this.findGoogleAccount(a.googleSub)) ? 'YA_EXISTE' : 'ID_TOMADO';
+  }
+
+  async findGoogleAccountById(accountId: string): Promise<GoogleAccount | null> {
+    const { rows } = await this.pool.query('SELECT * FROM booking.google_accounts WHERE account_id = $1', [accountId]);
+    return rows[0] ? toGoogle(rows[0]) : null;
+  }
+
+  async businessProfileOf(accountId: string): Promise<BusinessProfile | null> {
+    const { rows } = await this.pool.query('SELECT * FROM booking.business_profiles WHERE account_id = $1', [accountId]);
+    return rows[0] ? toBusiness(rows[0]) : null;
+  }
+
+  async insertBusinessProfile(p: BusinessProfile): Promise<InsertBusinessResult> {
+    // Un solo INSERT: la PRIMARY KEY (una por cuenta) y el UNIQUE del NIT deciden.
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO booking.business_profiles (account_id, legal_name, nit, phone, terms_version, accepted_at)
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+      [p.accountId, p.legalName, p.nit, p.phone, p.termsVersion, p.acceptedAt],
+    );
+    if (rowCount === 1) return 'ok';
+    return (await this.businessProfileOf(p.accountId)) ? 'YA_ES_NEGOCIO' : 'NIT_EN_USO';
   }
 
   async findAccount(nameKey: string): Promise<Account | null> {
