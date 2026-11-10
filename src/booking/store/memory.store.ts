@@ -1,6 +1,16 @@
 import type { Category, Place, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
 import { buildSeed } from '../seed';
-import type { Account, BookingStore, CancelFailure, InsertAccountResult, NewReservation, StoredPlace, WriteResult } from './booking.store';
+import type {
+  Account,
+  BookingStore,
+  CancelFailure,
+  GoogleAccount,
+  InsertAccountResult,
+  InsertGoogleResult,
+  NewReservation,
+  StoredPlace,
+  WriteResult,
+} from './booking.store';
 
 /**
  * Almacén en memoria. La comprobación de versión y la escritura ocurren en el
@@ -14,6 +24,7 @@ export class MemoryBookingStore implements BookingStore {
   private events: PlaceEvent[];
   private reservations: Reservation[] = [];
   private accounts: Account[] = [];
+  private googleAccounts: GoogleAccount[] = [];
 
   constructor() {
     const seed = buildSeed();
@@ -119,6 +130,26 @@ export class MemoryBookingStore implements BookingStore {
     s.taken = Math.max(0, s.taken - r.people);
     s.version += 1;
     return { ok: true, value: { reservation: r, slot: { ...s } } };
+  }
+
+  async findGoogleAccount(googleSub: string) {
+    const a = this.googleAccounts.find((x) => x.googleSub === googleSub);
+    return a ? { ...a } : null;
+  }
+
+  async insertGoogleAccount(a: GoogleAccount): Promise<InsertGoogleResult> {
+    // Igual que la PRIMARY KEY (google_sub) y el UNIQUE (account_id) de PostgreSQL.
+    if (this.googleAccounts.some((x) => x.googleSub === a.googleSub)) return 'YA_EXISTE';
+    if (this.googleAccounts.some((x) => x.accountId === a.accountId)) return 'ID_TOMADO';
+    this.googleAccounts.push({ ...a });
+    return 'ok';
+  }
+
+  async setGoogleRole(googleSub: string, role: 'cliente' | 'negocio') {
+    const a = this.googleAccounts.find((x) => x.googleSub === googleSub);
+    if (!a) return null;
+    if (a.role === null) a.role = role;
+    return { ...a };
   }
 
   async findAccount(nameKey: string) {

@@ -12,7 +12,7 @@ import { randomInt, randomUUID } from 'node:crypto';
 import { BusService } from '../bus/bus.service';
 import type { Identity } from '../common/identity';
 import type { Category, Place, PlaceDetail, PlaceEvent, Reservation, Slot, Zone } from './booking.types';
-import { claveNombre, DISPOSITIVO, limpiarNombre, NOMBRE } from './cuentas';
+import { claveNombre, CORREO, DISPOSITIVO, GOOGLE_SUB, limpiarNombre, NOMBRE, nombreDeGoogle } from './cuentas';
 import { armarLugar, type NewPlaceInput } from './new-place';
 import { BOOKING_STORE, type BookingStore, type StoredPlace, type WriteFailure } from './store/booking.store';
 import { publico } from './store/memory.store';
@@ -154,6 +154,39 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
       }
     }
     throw new ConflictException({ code: 'NOMBRE_EN_USO', message: `«${name}» ya lo está usando otra persona.` });
+  }
+
+  /**
+   * POST /accounts/google { googleSub, email, name, role? } → { accountId, name, email, role }.
+   * Solo lo llama el gateway, después de verificar el ID token de Google.
+   *
+   * La primera vez crea la cuenta. `role` llega cuando la persona elige si
+   * viene a salir o tiene un negocio; se guarda una sola vez y después manda el
+   * guardado (nadie se vuelve negocio cambiando lo que manda el navegador).
+   * `role: null` en la respuesta significa que todavía no ha elegido.
+   */
+  async googleAccount(input: { googleSub?: string; email?: string; name?: string; role?: string }) {
+    const googleSub = String(input?.googleSub ?? '');
+    const email = String(input?.email ?? '').trim().toLowerCase();
+    if (!GOOGLE_SUB.test(googleSub) || !CORREO.test(email)) {
+      throw new BadRequestException({ code: 'CUENTA_GOOGLE_INVALIDA', message: 'La identidad de Google llegó incompleta.' });
+    }
+    if (input?.role !== undefined && input.role !== 'cliente' && input.role !== 'negocio') {
+      throw new BadRequestException({ code: 'ROL_INVALIDO', message: 'El rol debe ser cliente o negocio.' });
+    }
+    const role = input?.role as 'cliente' | 'negocio' | undefined;
+
+    let cuenta = await this.store.findGoogleAccount(googleSub);
+    for (let intento = 0; !cuenta && intento < 4; intento++) {
+      const nueva = { googleSub, email, name: nombreDeGoogle(input?.name ?? '', email), accountId: `g${codigo(12)}`, role: role ?? null };
+      const r = await this.store.insertGoogleAccount(nueva);
+      if (r === 'ok') cuenta = nueva;
+      else if (r === 'YA_EXISTE') cuenta = await this.store.findGoogleAccount(googleSub);
+    }
+    if (!cuenta) throw new ConflictException({ code: 'CUENTA_NO_CREADA', message: 'No pudimos crear tu cuenta. Intenta de nuevo.' });
+    if (role && cuenta.role === null) cuenta = (await this.store.setGoogleRole(googleSub, role)) ?? cuenta;
+
+    return { accountId: cuenta.accountId, name: cuenta.name, email: cuenta.email, role: cuenta.role };
   }
 
   /** «Juan 2», «Juan 3»… el primero que esté libre. */

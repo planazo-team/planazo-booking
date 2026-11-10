@@ -40,6 +40,22 @@ export interface Account {
 /** Resultado de reclamar una cuenta: entra, o choca por el nombre o por el id. */
 export type InsertAccountResult = 'ok' | 'NOMBRE_TOMADO' | 'ID_TOMADO';
 
+/**
+ * Una cuenta de Google. `googleSub` es el id estable que Google da a cada
+ * persona (no cambia aunque cambie el correo). `role` queda en `null` hasta
+ * que la persona elige si viene a salir o tiene un negocio, y después no
+ * cambia. `accountId` es lo que el gateway pone en el token.
+ */
+export interface GoogleAccount {
+  googleSub: string;
+  email: string;
+  name: string;
+  accountId: string;
+  role: 'cliente' | 'negocio' | null;
+}
+
+export type InsertGoogleResult = 'ok' | 'YA_EXISTE' | 'ID_TOMADO';
+
 export interface NewReservation {
   id: string;
   code: string;
@@ -78,6 +94,13 @@ export interface BookingStore {
     reservationId: string,
     puede: (r: Reservation) => boolean,
   ): Promise<{ ok: true; value: { reservation: Reservation; slot: Slot } } | { ok: false; code: CancelFailure }>;
+
+  /** La cuenta de Google con ese `sub`, o `null`. */
+  findGoogleAccount(googleSub: string): Promise<GoogleAccount | null>;
+  /** Un solo INSERT: si dos pestañas entran a la vez con la misma cuenta, gana una. */
+  insertGoogleAccount(a: GoogleAccount): Promise<InsertGoogleResult>;
+  /** Fija el rol solo si todavía no tenía. Devuelve la cuenta como quedó. */
+  setGoogleRole(googleSub: string, role: 'cliente' | 'negocio'): Promise<GoogleAccount | null>;
 
   /** La cuenta dueña de un nombre (clave normalizada), o `null`. */
   findAccount(nameKey: string): Promise<Account | null>;

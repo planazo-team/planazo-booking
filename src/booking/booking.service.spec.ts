@@ -234,6 +234,37 @@ describe.each(almacenes)('BookingService (%s)', (_nombre, crear) => {
     );
     expect(await codigoDe(service.ownedPlace(dueño))).toBe('SIN_LUGAR');
   });
+  describe('cuentas de Google', () => {
+    const ana = { googleSub: '1098765432101', email: 'Ana@Gmail.com', name: 'Ana María' };
+
+    it('la primera vez crea la cuenta sin rol; al elegir, el rol queda guardado', async () => {
+      const nueva = await service.googleAccount(ana);
+      expect(nueva).toMatchObject({ name: 'Ana María', email: 'ana@gmail.com', role: null });
+      expect(nueva.accountId).toMatch(/^g[A-Z2-9]{12}$/);
+
+      const conRol = await service.googleAccount({ ...ana, role: 'negocio' });
+      expect(conRol).toEqual({ ...nueva, role: 'negocio' });
+      expect(await service.googleAccount(ana)).toEqual(conRol);
+    });
+
+    it('el rol no cambia aunque el navegador mande otro', async () => {
+      await service.googleAccount({ ...ana, role: 'cliente' });
+      expect((await service.googleAccount({ ...ana, role: 'negocio' })).role).toBe('cliente');
+    });
+
+    it('dos pestañas que entran a la vez terminan en la misma cuenta', async () => {
+      const r = await Promise.all(Array.from({ length: 10 }, () => service.googleAccount(ana)));
+      expect(new Set(r.map((x) => x.accountId)).size).toBe(1);
+    });
+
+    it('sin nombre usa el correo; rechaza identidades o roles inválidos', async () => {
+      expect((await service.googleAccount({ googleSub: '55', email: 'luis.p@escuelaing.edu.co', name: '  ' })).name).toBe('luis.p');
+      expect(await codigoDe(service.googleAccount({ googleSub: '', email: 'a@b.co' }))).toBe('CUENTA_GOOGLE_INVALIDA');
+      expect(await codigoDe(service.googleAccount({ googleSub: '1', email: 'sin-arroba' }))).toBe('CUENTA_GOOGLE_INVALIDA');
+      expect(await codigoDe(service.googleAccount({ ...ana, role: 'admin' }))).toBe('ROL_INVALIDO');
+    });
+  });
+
   describe('nombres únicos (cuentas)', () => {
     it('el mismo navegador vuelve a entrar con su nombre y conserva su id', async () => {
       const a = await service.claimAccount({ name: 'Juan', deviceId: 'dispositivoA1' });

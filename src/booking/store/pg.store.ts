@@ -3,7 +3,17 @@ import { Pool, type PoolClient } from 'pg';
 import type { Category, Place, PlaceEvent, Reservation, Slot, Zone } from '../booking.types';
 import { buildSeed } from '../seed';
 import { claveNombre } from '../cuentas';
-import type { Account, BookingStore, CancelFailure, InsertAccountResult, NewReservation, StoredPlace, WriteResult } from './booking.store';
+import type {
+  Account,
+  BookingStore,
+  CancelFailure,
+  GoogleAccount,
+  InsertAccountResult,
+  InsertGoogleResult,
+  NewReservation,
+  StoredPlace,
+  WriteResult,
+} from './booking.store';
 
 /**
  * Almacén en PostgreSQL, esquema `booking` (puede compartir base con otros
@@ -84,6 +94,16 @@ CREATE TABLE IF NOT EXISTS booking.accounts (
   created_at bigint NOT NULL DEFAULT (extract(epoch FROM now()) * 1000)::bigint
 );
 
+-- Cuentas de Google: se entra solo con Google. El rol se elige una vez.
+CREATE TABLE IF NOT EXISTS booking.google_accounts (
+  google_sub text PRIMARY KEY,
+  email      text NOT NULL,
+  name       text NOT NULL,
+  account_id text NOT NULL UNIQUE,
+  role       text CHECK (role IN ('cliente', 'negocio')),
+  created_at bigint NOT NULL DEFAULT (extract(epoch FROM now()) * 1000)::bigint
+);
+
 ALTER TABLE booking.places ADD COLUMN IF NOT EXISTS owner_name text;
 
 -- Los tres negocios creados antes de que existieran las cuentas: el nombre con
@@ -94,6 +114,14 @@ UPDATE booking.places SET owner_name = v.n
 `;
 
 type Row = Record<string, unknown>;
+
+const toGoogle = (r: Row): GoogleAccount => ({
+  googleSub: String(r.google_sub),
+  email: String(r.email),
+  name: String(r.name),
+  accountId: String(r.account_id),
+  role: (r.role as GoogleAccount['role']) ?? null,
+});
 
 const toPlace = (r: Row): StoredPlace => ({
   id: String(r.id),
@@ -299,6 +327,26 @@ export class PgBookingStore implements BookingStore {
         );
       }
     });
+  }
+
+  async findGoogleAccount(googleSub: string): Promise<GoogleAccount | null> {
+    const { rows } = await this.pool.query('SELECT * FROM booking.google_accounts WHERE google_sub = $1', [googleSub]);
+    return rows[0] ? toGoogle(rows[0]) : null;
+  }
+
+  async insertGoogleAccount(a: GoogleAccount): Promise<InsertGoogleResult> {
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO booking.google_accounts (google_sub, email, name, account_id, role) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+      [a.googleSub, a.email, a.name, a.accountId, a.role],
+    );
+    if (rowCount === 1) return 'ok';
+    return (await this.findGoogleAccount(a.googleSub)) ? 'YA_EXISTE' : 'ID_TOMADO';
+  }
+
+  async setGoogleRole(googleSub: string, role: 'cliente' | 'negocio'): Promise<GoogleAccount | null> {
+    // `role IS NULL`: el rol se elige una sola vez, aunque lleguen dos pedidos a la vez.
+    await this.pool.query('UPDATE booking.google_accounts SET role = $2 WHERE google_sub = $1 AND role IS NULL', [googleSub, role]);
+    return this.findGoogleAccount(googleSub);
   }
 
   async findAccount(nameKey: string): Promise<Account | null> {

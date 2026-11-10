@@ -30,6 +30,7 @@ function nombreDesdeRequest(req: Request, fallback: string): string {
  *   DELETE /reservations/:id                   cancelar (quien reservó o el lugar)
  *   POST  /events                              panel: publicar evento
  *   POST  /accounts/claim                      solo el gateway: nombre único al entrar
+ *   POST  /accounts/google                     solo el gateway: cuenta de Google y su rol
  */
 @Controller()
 export class BookingController {
@@ -40,6 +41,12 @@ export class BookingController {
   @HttpCode(200)
   claimAccount(@Body() body: { name?: string; deviceId?: string }) {
     return this.booking.claimAccount(body ?? {});
+  }
+
+  @Post('accounts/google')
+  @HttpCode(200)
+  googleAccount(@Body() body: { googleSub?: string; email?: string; name?: string; role?: string }) {
+    return this.booking.googleAccount(body ?? {});
   }
 
   @Get('places')
