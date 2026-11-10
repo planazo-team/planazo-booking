@@ -4,8 +4,10 @@ import type {
   Account,
   BookingStore,
   CancelFailure,
+  BusinessProfile,
   GoogleAccount,
   InsertAccountResult,
+  InsertBusinessResult,
   InsertGoogleResult,
   NewReservation,
   StoredPlace,
@@ -25,6 +27,7 @@ export class MemoryBookingStore implements BookingStore {
   private reservations: Reservation[] = [];
   private accounts: Account[] = [];
   private googleAccounts: GoogleAccount[] = [];
+  private businessProfiles: BusinessProfile[] = [];
 
   constructor() {
     const seed = buildSeed();
@@ -145,11 +148,22 @@ export class MemoryBookingStore implements BookingStore {
     return 'ok';
   }
 
-  async setGoogleRole(googleSub: string, role: 'cliente' | 'negocio') {
-    const a = this.googleAccounts.find((x) => x.googleSub === googleSub);
-    if (!a) return null;
-    if (a.role === null) a.role = role;
-    return { ...a };
+  async findGoogleAccountById(accountId: string) {
+    const a = this.googleAccounts.find((x) => x.accountId === accountId);
+    return a ? { ...a } : null;
+  }
+
+  async businessProfileOf(accountId: string) {
+    const p = this.businessProfiles.find((x) => x.accountId === accountId);
+    return p ? { ...p } : null;
+  }
+
+  async insertBusinessProfile(p: BusinessProfile): Promise<InsertBusinessResult> {
+    // Igual que la PRIMARY KEY (account_id) y el UNIQUE (nit) de PostgreSQL.
+    if (this.businessProfiles.some((x) => x.accountId === p.accountId)) return 'YA_ES_NEGOCIO';
+    if (this.businessProfiles.some((x) => x.nit === p.nit)) return 'NIT_EN_USO';
+    this.businessProfiles.push({ ...p });
+    return 'ok';
   }
 
   async findAccount(nameKey: string) {
