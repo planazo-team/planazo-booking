@@ -11,6 +11,13 @@
 | **Puerto local sugerido** | `3001` |
 | **Contexto general** | [planazo-frontend/docs/contexto.md](https://github.com/planazo-team/planazo-frontend/blob/main/docs/contexto.md) |
 
+**Escenario 4 (Disponibilidad):** `docker compose up` en este repo levanta 2
+réplicas de este servicio + un balanceador Nginx propio (`nginx.conf`),
+publicado en el mismo puerto `3001` de siempre. Requiere que
+`planazo-infra` ya esté arriba (crea la red compartida `planazo-net` y
+`postgres-booking`/`redis`). Detalle completo:
+[`planazo-infra/ESCENARIO-04-DISPONIBILIDAD.md`](https://github.com/planazo-team/planazo-infra/blob/main/ESCENARIO-04-DISPONIBILIDAD.md).
+
 ---
 
 ## Contrato con el gateway
