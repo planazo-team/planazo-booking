@@ -5,6 +5,7 @@ import type {
   BookingStore,
   CancelFailure,
   BusinessProfile,
+  DosPasos,
   GoogleAccount,
   InsertAccountResult,
   InsertBusinessResult,
@@ -28,6 +29,7 @@ export class MemoryBookingStore implements BookingStore {
   private accounts: Account[] = [];
   private googleAccounts: GoogleAccount[] = [];
   private businessProfiles: BusinessProfile[] = [];
+  private dosPasos = new Map<string, DosPasos>();
 
   constructor() {
     const seed = buildSeed();
@@ -164,6 +166,37 @@ export class MemoryBookingStore implements BookingStore {
     if (this.businessProfiles.some((x) => x.nit === p.nit)) return 'NIT_EN_USO';
     this.businessProfiles.push({ ...p });
     return 'ok';
+  }
+
+  async dosPasosDe(accountId: string) {
+    const d = this.dosPasos.get(accountId);
+    return d ? { ...d } : null;
+  }
+
+  async guardarDosPasosPendiente(accountId: string, secretoCifrado: string) {
+    if (this.dosPasos.get(accountId)?.activo) return false;
+    this.dosPasos.set(accountId, { accountId, secretoCifrado, activo: false, ultimoPaso: 0, fallos: 0, bloqueadoHasta: 0 });
+    return true;
+  }
+
+  async activarDosPasos(accountId: string, paso: number) {
+    const d = this.dosPasos.get(accountId);
+    if (d) Object.assign(d, { activo: true, ultimoPaso: paso, fallos: 0, bloqueadoHasta: 0 });
+  }
+
+  async usarPasoDosPasos(accountId: string, paso: number) {
+    const d = this.dosPasos.get(accountId);
+    if (!d || paso <= d.ultimoPaso) return false;
+    Object.assign(d, { ultimoPaso: paso, fallos: 0 });
+    return true;
+  }
+
+  async fallarDosPasos(accountId: string, max: number, bloqueoHasta: number) {
+    const d = this.dosPasos.get(accountId);
+    if (!d) return null;
+    d.fallos += 1;
+    if (d.fallos >= max) Object.assign(d, { fallos: 0, bloqueadoHasta: bloqueoHasta });
+    return { ...d };
   }
 
   async findAccount(nameKey: string) {

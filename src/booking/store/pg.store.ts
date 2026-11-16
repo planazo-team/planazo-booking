@@ -8,6 +8,7 @@ import type {
   BookingStore,
   CancelFailure,
   BusinessProfile,
+  DosPasos,
   GoogleAccount,
   InsertAccountResult,
   InsertBusinessResult,
@@ -117,6 +118,17 @@ CREATE TABLE IF NOT EXISTS booking.business_profiles (
 
 ALTER TABLE booking.places ADD COLUMN IF NOT EXISTS owner_name text;
 
+-- Verificación en dos pasos (TOTP) del modo negocio. El secreto va cifrado (AES-256-GCM).
+CREATE TABLE IF NOT EXISTS booking.dos_pasos (
+  account_id      text PRIMARY KEY REFERENCES booking.google_accounts(account_id),
+  secreto         text NOT NULL,
+  activo          boolean NOT NULL DEFAULT false,
+  ultimo_paso     bigint NOT NULL DEFAULT 0,
+  fallos          integer NOT NULL DEFAULT 0,
+  bloqueado_hasta bigint NOT NULL DEFAULT 0,
+  actualizado_en  bigint NOT NULL DEFAULT (extract(epoch FROM now()) * 1000)::bigint
+);
+
 -- Los tres negocios creados antes de que existieran las cuentas: el nombre con
 -- que entró su dueño sale de su PLACE.CREATED en el event log de realtime.
 UPDATE booking.places SET owner_name = v.n
@@ -188,6 +200,18 @@ const toReservation = (r: Row): Reservation => ({
 });
 
 const PLACE_COLS = 'p.id, p.name, p.category, p.zone, p.lat, p.lng, p.description, p.price_level, p.cover, p.owner_id, p.owner_name';
+
+/** Fila de booking.dos_pasos → DosPasos. */
+function toDosPasos(r: Record<string, unknown>): DosPasos {
+  return {
+    accountId: String(r.account_id),
+    secretoCifrado: String(r.secreto),
+    activo: r.activo === true,
+    ultimoPaso: Number(r.ultimo_paso),
+    fallos: Number(r.fallos),
+    bloqueadoHasta: Number(r.bloqueado_hasta),
+  };
+}
 
 export class PgBookingStore implements BookingStore {
   private readonly logger = new Logger(PgBookingStore.name);
@@ -381,6 +405,52 @@ export class PgBookingStore implements BookingStore {
     );
     if (rowCount === 1) return 'ok';
     return (await this.businessProfileOf(p.accountId)) ? 'YA_ES_NEGOCIO' : 'NIT_EN_USO';
+  }
+
+  async dosPasosDe(accountId: string): Promise<DosPasos | null> {
+    const { rows } = await this.pool.query('SELECT * FROM booking.dos_pasos WHERE account_id = $1', [accountId]);
+    return rows[0] ? toDosPasos(rows[0]) : null;
+  }
+
+  async guardarDosPasosPendiente(accountId: string, secretoCifrado: string): Promise<boolean> {
+    // Un solo statement: inserta, o reemplaza el pendiente, pero nunca uno ya activo.
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO booking.dos_pasos (account_id, secreto) VALUES ($1, $2)
+       ON CONFLICT (account_id) DO UPDATE
+         SET secreto = EXCLUDED.secreto, ultimo_paso = 0, fallos = 0, bloqueado_hasta = 0,
+             actualizado_en = (extract(epoch FROM now()) * 1000)::bigint
+         WHERE booking.dos_pasos.activo = false`,
+      [accountId, secretoCifrado],
+    );
+    return rowCount === 1;
+  }
+
+  async activarDosPasos(accountId: string, paso: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE booking.dos_pasos SET activo = true, ultimo_paso = $2, fallos = 0, bloqueado_hasta = 0,
+         actualizado_en = (extract(epoch FROM now()) * 1000)::bigint WHERE account_id = $1`,
+      [accountId, paso],
+    );
+  }
+
+  async usarPasoDosPasos(accountId: string, paso: number): Promise<boolean> {
+    // Indivisible: dos réplicas no pueden aceptar el mismo código.
+    const { rowCount } = await this.pool.query(
+      'UPDATE booking.dos_pasos SET ultimo_paso = $2, fallos = 0 WHERE account_id = $1 AND ultimo_paso < $2',
+      [accountId, paso],
+    );
+    return rowCount === 1;
+  }
+
+  async fallarDosPasos(accountId: string, max: number, bloqueoHasta: number): Promise<DosPasos | null> {
+    const { rows } = await this.pool.query(
+      `UPDATE booking.dos_pasos
+          SET fallos = CASE WHEN fallos + 1 >= $2 THEN 0 ELSE fallos + 1 END,
+              bloqueado_hasta = CASE WHEN fallos + 1 >= $2 THEN $3 ELSE bloqueado_hasta END
+        WHERE account_id = $1 RETURNING *`,
+      [accountId, max, bloqueoHasta],
+    );
+    return rows[0] ? toDosPasos(rows[0]) : null;
   }
 
   async findAccount(nameKey: string): Promise<Account | null> {

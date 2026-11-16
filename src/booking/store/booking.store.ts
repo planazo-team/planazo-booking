@@ -70,6 +70,19 @@ export interface BusinessProfile {
 
 export type InsertBusinessResult = 'ok' | 'YA_ES_NEGOCIO' | 'NIT_EN_USO';
 
+/** Verificación en dos pasos (TOTP) de una cuenta. El secreto va cifrado. */
+export interface DosPasos {
+  accountId: string;
+  secretoCifrado: string;
+  activo: boolean;
+  /** Último paso de 30 s ya usado: un código no sirve dos veces. */
+  ultimoPaso: number;
+  /** Códigos equivocados seguidos. */
+  fallos: number;
+  /** Hasta cuándo (epoch ms) no se aceptan códigos tras demasiados fallos. */
+  bloqueadoHasta: number;
+}
+
 export type InsertGoogleResult = 'ok' | 'YA_EXISTE' | 'ID_TOMADO';
 
 export interface NewReservation {
@@ -119,6 +132,17 @@ export interface BookingStore {
   businessProfileOf(accountId: string): Promise<BusinessProfile | null>;
   /** Un solo INSERT: la cuenta y el NIT son únicos. Indivisible ante pedidos simultáneos. */
   insertBusinessProfile(p: BusinessProfile): Promise<InsertBusinessResult>;
+
+  /** La configuración de dos pasos de la cuenta, o `null`. */
+  dosPasosDe(accountId: string): Promise<DosPasos | null>;
+  /** Guarda un secreto nuevo sin activar; no toca una configuración ya activa. Devuelve false si ya estaba activa. */
+  guardarDosPasosPendiente(accountId: string, secretoCifrado: string): Promise<boolean>;
+  /** Activa los dos pasos y marca el paso usado al confirmar. */
+  activarDosPasos(accountId: string, paso: number): Promise<void>;
+  /** Marca un paso como usado solo si es posterior al último (indivisible). false = código ya usado. */
+  usarPasoDosPasos(accountId: string, paso: number): Promise<boolean>;
+  /** Suma un fallo; al llegar a `max` bloquea hasta `bloqueoHasta` y reinicia el conteo. */
+  fallarDosPasos(accountId: string, max: number, bloqueoHasta: number): Promise<DosPasos | null>;
 
   /** La cuenta dueña de un nombre (clave normalizada), o `null`. */
   findAccount(nameKey: string): Promise<Account | null>;

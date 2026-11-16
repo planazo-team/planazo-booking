@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Inject,
   Injectable,
   NotFoundException,
@@ -27,6 +28,7 @@ import {
   TERMINOS_NEGOCIO,
 } from './cuentas';
 import { armarLugar, type NewPlaceInput } from './new-place';
+import { cifrar, descifrar, generarSecreto, uriOtpauth, verificarCodigo } from './dos-pasos';
 import { BOOKING_STORE, type BookingStore, type StoredPlace, type WriteFailure } from './store/booking.store';
 import { publico } from './store/memory.store';
 
@@ -64,6 +66,10 @@ const MENSAJE: Record<WriteFailure, { reserva: string; panel: string }> = {
  * escritura las hace el almacén en un solo paso (en PostgreSQL, un UPDATE con
  * la versión en el WHERE): ver store/booking.store.ts.
  */
+/** Códigos equivocados seguidos antes de bloquear y por cuánto tiempo (ESC-01). */
+const MAX_FALLOS_2FA = 5;
+const BLOQUEO_2FA_MS = 5 * 60_000;
+
 @Injectable()
 export class BookingService implements OnModuleInit, OnModuleDestroy {
   constructor(
@@ -188,14 +194,99 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
       else if (r === 'YA_EXISTE') cuenta = await this.store.findGoogleAccount(googleSub);
     }
     if (!cuenta) throw new ConflictException({ code: 'CUENTA_NO_CREADA', message: 'No pudimos crear tu cuenta. Intenta de nuevo.' });
-    return { ...this.publicaCuenta(cuenta), negocio: !!(await this.store.businessProfileOf(cuenta.accountId)) };
+    return {
+      ...this.publicaCuenta(cuenta),
+      negocio: !!(await this.store.businessProfileOf(cuenta.accountId)),
+      dosPasos: !!(await this.store.dosPasosDe(cuenta.accountId))?.activo,
+    };
   }
 
   /** GET /accounts/:accountId → { accountId, name, email, negocio }. Para cambiar de modo. */
   async accountById(accountId: string) {
     const cuenta = CUENTA_GOOGLE.test(accountId) ? await this.store.findGoogleAccountById(accountId) : null;
     if (!cuenta) throw new NotFoundException({ code: 'CUENTA_NO_EXISTE', message: 'La cuenta no existe.' });
-    return { ...this.publicaCuenta(cuenta), negocio: !!(await this.store.businessProfileOf(accountId)) };
+    return {
+      ...this.publicaCuenta(cuenta),
+      negocio: !!(await this.store.businessProfileOf(accountId)),
+      dosPasos: !!(await this.store.dosPasosDe(accountId))?.activo,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Verificación en dos pasos del modo negocio (TOTP con app autenticadora).
+  // Solo las llama el gateway, con su llave. ESC-01: autenticación multifactor.
+  // ---------------------------------------------------------------------------
+
+  /** GET /accounts/:accountId/2fa → { activo } */
+  async estadoDosPasos(accountId: string) {
+    await this.cuentaExistente(accountId);
+    return { activo: !!(await this.store.dosPasosDe(accountId))?.activo };
+  }
+
+  /**
+   * POST /accounts/:accountId/2fa/iniciar → { otpauthUri, secreto }.
+   * Genera un secreto nuevo (sin activar) para mostrarlo como QR. Solo para
+   * cuentas con el negocio registrado y que todavía no lo tengan activo.
+   */
+  async iniciarDosPasos(accountId: string) {
+    const cuenta = await this.cuentaExistente(accountId);
+    if (!(await this.store.businessProfileOf(accountId))) {
+      throw new ForbiddenException({ code: 'NEGOCIO_NO_REGISTRADO', message: 'Primero registra tu negocio.' });
+    }
+    const secreto = generarSecreto();
+    if (!(await this.store.guardarDosPasosPendiente(accountId, cifrar(secreto)))) {
+      throw new ConflictException({ code: '2FA_YA_ACTIVO', message: 'La verificación en dos pasos ya está activa.' });
+    }
+    return { otpauthUri: uriOtpauth(secreto, cuenta.email), secreto };
+  }
+
+  /** POST /accounts/:accountId/2fa/confirmar { codigo } → { activo: true }. El primer código de la app la activa. */
+  async confirmarDosPasos(accountId: string, codigo: unknown) {
+    await this.cuentaExistente(accountId);
+    const d = await this.store.dosPasosDe(accountId);
+    if (!d) throw new ConflictException({ code: '2FA_NO_INICIADO', message: 'Primero genera el código QR.' });
+    if (d.activo) throw new ConflictException({ code: '2FA_YA_ACTIVO', message: 'La verificación en dos pasos ya está activa.' });
+    const paso = await this.comprobarCodigo(accountId, d, codigo);
+    await this.store.activarDosPasos(accountId, paso);
+    return { activo: true };
+  }
+
+  /** POST /accounts/:accountId/2fa/verificar { codigo } → { ok: true }. Para entrar en modo negocio. */
+  async verificarDosPasos(accountId: string, codigo: unknown) {
+    await this.cuentaExistente(accountId);
+    const d = await this.store.dosPasosDe(accountId);
+    if (!d?.activo) throw new ConflictException({ code: '2FA_NO_ACTIVO', message: 'Esta cuenta no tiene activa la verificación en dos pasos.' });
+    const paso = await this.comprobarCodigo(accountId, d, codigo);
+    // Un código vale una sola vez, aunque siga vigente y lo use otra réplica.
+    if (!(await this.store.usarPasoDosPasos(accountId, paso))) {
+      throw new HttpException({ code: '2FA_INVALIDO', message: 'Ese código ya se usó. Espera el siguiente en tu app.' }, 401);
+    }
+    return { ok: true };
+  }
+
+  private async cuentaExistente(accountId: string) {
+    const cuenta = CUENTA_GOOGLE.test(accountId) ? await this.store.findGoogleAccountById(accountId) : null;
+    if (!cuenta) throw new NotFoundException({ code: 'CUENTA_NO_EXISTE', message: 'La cuenta no existe.' });
+    return cuenta;
+  }
+
+  /** Verifica el código; tras MAX_FALLOS_2FA seguidos bloquea la cuenta BLOQUEO_2FA_MS. Devuelve el paso que coincidió. */
+  private async comprobarCodigo(accountId: string, d: { secretoCifrado: string; bloqueadoHasta: number }, codigo: unknown): Promise<number> {
+    const ahora = Date.now();
+    if (d.bloqueadoHasta > ahora) throw this.bloqueado(d.bloqueadoHasta - ahora);
+    const paso = verificarCodigo(descifrar(d.secretoCifrado), String(codigo ?? ''), ahora);
+    if (paso !== null) return paso;
+    const tras = await this.store.fallarDosPasos(accountId, MAX_FALLOS_2FA, ahora + BLOQUEO_2FA_MS);
+    if (tras && tras.bloqueadoHasta > ahora) throw this.bloqueado(tras.bloqueadoHasta - ahora);
+    throw new HttpException({ code: '2FA_INVALIDO', message: 'El código no es correcto. Revisa tu app autenticadora.' }, 401);
+  }
+
+  private bloqueado(restanteMs: number) {
+    const min = Math.max(1, Math.ceil(restanteMs / 60_000));
+    return new HttpException(
+      { code: '2FA_BLOQUEADO', message: `Demasiados códigos equivocados. Intenta de nuevo en ${min} min.` },
+      429,
+    );
   }
 
   private publicaCuenta(c: { accountId: string; name: string; email: string }) {
