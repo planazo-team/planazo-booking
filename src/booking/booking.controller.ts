@@ -33,6 +33,10 @@ function nombreDesdeRequest(req: Request, fallback: string): string {
  *   POST  /accounts/google                     solo el gateway: cuenta de Google
  *   GET   /accounts/:accountId                 solo el gateway: ¿tiene modo negocio?
  *   POST  /accounts/:accountId/negocio         solo el gateway: activar el modo negocio
+ *   GET   /accounts/:accountId/2fa             solo el gateway: ¿tiene dos pasos activo?
+ *   POST  /accounts/:accountId/2fa/iniciar     solo el gateway: secreto nuevo para el QR
+ *   POST  /accounts/:accountId/2fa/confirmar   solo el gateway: el primer código lo activa
+ *   POST  /accounts/:accountId/2fa/verificar   solo el gateway: código para entrar en modo negocio
  */
 @Controller()
 export class BookingController {
@@ -63,6 +67,29 @@ export class BookingController {
     @Body() body: { legalName?: string; nit?: string; phone?: string; acceptTerms?: boolean },
   ) {
     return this.booking.registerBusiness(accountId, body ?? {});
+  }
+
+  @Get('accounts/:accountId/2fa')
+  estadoDosPasos(@Param('accountId') accountId: string) {
+    return this.booking.estadoDosPasos(accountId);
+  }
+
+  @Post('accounts/:accountId/2fa/iniciar')
+  @HttpCode(200)
+  iniciarDosPasos(@Param('accountId') accountId: string) {
+    return this.booking.iniciarDosPasos(accountId);
+  }
+
+  @Post('accounts/:accountId/2fa/confirmar')
+  @HttpCode(200)
+  confirmarDosPasos(@Param('accountId') accountId: string, @Body('codigo') codigo: unknown) {
+    return this.booking.confirmarDosPasos(accountId, codigo);
+  }
+
+  @Post('accounts/:accountId/2fa/verificar')
+  @HttpCode(200)
+  verificarDosPasos(@Param('accountId') accountId: string, @Body('codigo') codigo: unknown) {
+    return this.booking.verificarDosPasos(accountId, codigo);
   }
 
   @Get('places')
