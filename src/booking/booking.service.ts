@@ -31,6 +31,7 @@ import { armarLugar, type NewPlaceInput } from './new-place';
 import { cifrar, descifrar, generarSecreto, uriOtpauth, verificarCodigo } from './dos-pasos';
 import { BOOKING_STORE, type BookingStore, type StoredPlace, type WriteFailure } from './store/booking.store';
 import { publico } from './store/memory.store';
+import { cancelaciones, rechazosReserva, reservas } from '../common/metrics';
 
 const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -400,7 +401,8 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
     if (!r.ok) this.fallo(r.code, 'reserva');
 
     const { slot, reservation } = r.value;
-    await this.emitInventory(slot);
+    const zona = await this.emitInventory(slot);
+    reservas.inc({ zona: zona ?? 'desconocida' });
     await this.bus.publish('RESERVE.OK', reservation, [`place:${slot.placeId}`, `user:${who.userId}`]);
     return reservation;
   }
@@ -422,7 +424,8 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException({ code: 'RESERVA_NO_EXISTE', message: 'La reserva no existe o ya fue cancelada.' });
     }
     const { reservation, slot } = r.value;
-    await this.emitInventory(slot);
+    const zona = await this.emitInventory(slot);
+    cancelaciones.inc({ zona: zona ?? 'desconocida' });
     await this.bus.publish(
       'RESERVE.CANCELLED',
       { id: reservation.id, placeId: reservation.placeId, slotId: reservation.slotId, people: reservation.people, userId: reservation.userId },
@@ -483,6 +486,7 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
   /* ------------------------------------------------------------------ */
 
   private fallo(code: WriteFailure, donde: 'reserva' | 'panel', current?: Slot): never {
+    rechazosReserva.inc({ motivo: code, donde });
     const message = MENSAJE[code][donde];
     if (code === 'FRANJA_NO_EXISTE') throw new NotFoundException({ code, message });
     throw new ConflictException({ code, message, ...(current ? { current } : {}) });
@@ -505,12 +509,14 @@ export class BookingService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** RT-1: el cambio de la franja a quien mira la ficha y el resumen a quien mira el mapa. */
-  private async emitInventory(slot: Slot): Promise<void> {
+  /** Avisa el cambio de inventario y devuelve la zona del lugar (para las métricas). */
+  private async emitInventory(slot: Slot): Promise<string | undefined> {
     const p = await this.store.getPlace(slot.placeId);
-    if (!p) return;
+    if (!p) return undefined;
     await this.bus.publish('INV.UPDATE', { placeId: p.id, slot }, [`place:${p.id}`]);
     await this.bus.publish('PLACE.UPDATE', { placeId: p.id, freeSeats: await this.store.freeSeats(p.id) }, [
       `zone:${p.zone}`,
     ]);
+    return p.zone;
   }
 }
